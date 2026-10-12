@@ -1,0 +1,2813 @@
+<!DOCTYPE html>
+<!--
+  nanoesca3d.html - 3D volume viewer for Pro-NanoESCA ARPES datasets (parallel to the 2D index.html)
+  Copyright (c) 2026 Giorgio Levy - MIT License (https://opensource.org/licenses/MIT)
+  Single self-contained file, zero external dependencies. Portions transplanted verbatim
+  from NanoESCA Viewer 2.5 (repo: giorgiolevy/nanoesca). 3D engine (WebGL2 ray-marching:
+  DVR / iso-surface / MIP + slab clipping), minimap, profiles and calibration written with
+  generative-AI assistance during the 2026-10 sandbox-outage staging and assembled 2026-10-12.
+
+  Features beyond the 2D viewer: WebGL2 volume rendering (DVR / iso / MIP) with E/kx/ky
+  cut planes; a kx-ky minimap at the cursor energy; three single-point profiles
+  (E / kx / ky) sharing one 3D cursor; a draggable two-handle colour bar; gamma and
+  percentile contrast; and a dI/dE (energy-derivative) data mode for weak / near-Fermi
+  features. All controls have an in-app "How to use" panel at the top of the side bar.
+  Fully self-contained (no external requests); append ?selftest to run the built-in tests.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NanoESCA 3D Viewer</title>
+<style>
+:root {
+  --bg-color: #ffffff; --text-color: #333333; --toolbar-bg: #f8f9fa;
+  --border-color: #dee2e6; --canvas-bg: #ffffff; --axis-color: #333333;
+  --grid-color: #e0e0e0; --profile-line: #000000; --input-bg: #ffffff;
+  --button-hover: #e9ecec; --status-color: #d62728; --panel-bg:#ffffff;
+  color-scheme: light;
+}
+body.dark-mode {
+  --bg-color: #1a1a2e; --text-color: #e0e0e0; --toolbar-bg: #16213e;
+  --border-color: #0f3460; --canvas-bg: #0d1117; --axis-color: #c9d1d9;
+  --grid-color: #21262d; --profile-line: #58a6ff; --input-bg: #0f3460;
+  --button-hover: #533483; --status-color: #ff6b6b; --panel-bg:#0d1117;
+  color-scheme: dark;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg-color); color: var(--text-color); overflow: hidden; transition: background 0.2s, color 0.2s; }
+#app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+#toolbar { background: var(--toolbar-bg); padding: 8px 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border-color); flex-wrap: wrap; transition: background 0.2s, border-color 0.2s; }
+#toolbar h1 { font-size: 17px; color: var(--status-color); white-space: nowrap; }
+#toolbar button, #toolbar select, #toolbar input { background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); padding: 6px 10px; border-radius: 4px; font-size: 13px; transition: all 0.2s; }
+#toolbar button:hover { background: var(--button-hover); cursor: pointer; }
+#toolbar label { font-size: 13px; color: var(--text-color); display: flex; align-items: center; gap: 6px; }
+#themeBtn { font-size: 16px; padding: 4px 10px !important; line-height: 1; }
+#fileInfo { font-size: 12px; color: var(--text-color); flex-grow: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 140px; opacity: 0.85; }
+#status { font-size: 12px; color: var(--status-color); width: 100%; }
+#main { display: flex; flex: 1; overflow: hidden; }
+#plotArea { flex: 1; position: relative; background: var(--bg-color); overflow: hidden; padding: 5px; touch-action: none; transition: background 0.2s; }
+#glWrap { position: relative; width: 100%; height: 100%; }
+#gl3dCanvas, #glOverlayCanvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; touch-action: none; }
+#gl3dCanvas { cursor: grab; }
+#gl3dCanvas.panning { cursor: grabbing; }
+#glOverlayCanvas { pointer-events: none; }
+#glFallback { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); font-size:15px; opacity:.75; display:none; text-align:center; max-width:80%; }
+#plotColorWrap { position:absolute; left:8px; right:8px; bottom:6px; display:flex; gap:14px; align-items:center; }
+#colorbar { flex:1; cursor: ew-resize; width: auto; height: 46px; touch-action: none; border: 1px solid var(--border-color); border-radius: 4px; background: var(--canvas-bg); }
+#colorbarLabels { display:flex; flex-direction:column; font-size:11px; opacity:.85; font-family:ui-monospace,monospace; min-width:74px; }
+#sideArea { width: 360px; background: var(--bg-color); border-left: 1px solid var(--border-color); display: flex; flex-direction: column; overflow-y: auto; transition: background 0.2s, border-color 0.2s; }
+.sidePanel { padding: 8px 10px; border-bottom: 1px solid var(--border-color); }
+.sidePanel h3 { font-size: 13px; color: var(--status-color); margin-bottom: 6px; }
+#miniWrap { position: relative; width: 100%; padding-top: 100%; min-height: 180px; }
+#heatmapCanvas, #overlayCanvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; border: 1px solid var(--border-color); border-radius: 4px; }
+#heatmapCanvas { cursor: crosshair; background: var(--canvas-bg); }
+#overlayCanvas { pointer-events: none; background: transparent; border-color: transparent; }
+#miniInfo { font-size: 11px; opacity: .85; margin-top: 4px; font-family: ui-monospace, monospace; }
+.profileCanvas { width: 100%; height: 110px; background: var(--canvas-bg); border: 1px solid var(--border-color); border-radius: 4px; }
+.avgRow { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 3px; font-size: 11px; opacity: .9; }
+.avgRow button, .slabBtns button { padding: 2px 10px; font-size: 13px; line-height: 1.4; border-radius: 4px; border: 1px solid var(--border-color); background: var(--input-bg); color: var(--text-color); cursor: pointer; }
+.avgRow button:hover, .slabBtns button:hover { background: var(--button-hover); }
+#hProfileCanvas, #vProfileCanvas, #eProfileCanvas { cursor: ew-resize; touch-action: none; }
+#cursorInfo { padding: 8px 10px; font-size: 12px; color: var(--text-color); background: var(--bg-color); border-top: 1px solid var(--border-color); }
+#cursorText { margin-bottom: 6px; opacity: 0.85; white-space: pre-line; font-family: ui-monospace, monospace; font-size: 11px; }
+.slabRow { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.slabRow .slabVal { font-family: ui-monospace,monospace; min-width: 74px; text-align: right; font-size: 11px; }
+.slabRow input[type=range] { flex: 1; min-width: 60px; }
+.slabRow .slabName { width: 22px; font-size: 12px; font-weight: 600; }
+.slabBtns { display: flex; gap: 4px; }
+.slabBtns button { padding: 2px 6px; font-size: 11px; }
+.wVal { font-size: 11px; opacity: .8; min-width: 34px; text-align: center; }
+.sliderRow { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 6px; }
+.sliderRow input[type=range] { flex: 1; }
+.sliderVal { font-family: ui-monospace,monospace; min-width: 62px; text-align: right; }
+#loadOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.55); display: none; align-items: center; justify-content: center; z-index: 1000; }
+#loadOverlay .box { background: var(--toolbar-bg); padding: 26px 36px; border-radius: 10px; text-align: center; border: 1px solid var(--border-color); color: var(--text-color); min-width: 300px; }
+.spinner { border: 3px solid var(--border-color); border-top: 3px solid var(--status-color); border-radius: 50%; width: 38px; height: 38px; animation: spin 1s linear infinite; margin: 0 auto 14px; }
+@keyframes spin { 100% { transform: rotate(360deg); } }
+#loadText { font-size: 14px; margin-bottom: 10px; }
+#loadBarOuter { width: 100%; height: 8px; background: var(--border-color); border-radius: 4px; overflow: hidden; }
+#loadBar { height: 100%; width: 0%; background: var(--status-color); transition: width 0.15s; }
+.kv { font-size: 12px; font-family: ui-monospace,monospace; opacity: 0.9; white-space: pre-line; max-height: 150px; overflow-y: auto; }
+#sideArea label { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+#sideArea input[type=checkbox] { accent-color: var(--status-color); }
+#sideArea select.sel, #sideArea select { background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); border-radius: 4px; padding: 4px 6px; font-size: 12px; }
+#sideArea .sliderRow span { font-size: 12px; white-space: nowrap; }
+#sideArea button { background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; }
+#sideArea button:hover { background: var(--button-hover); }
+#sideArea input[type=text] { background: var(--input-bg); color: var(--text-color); border: 1px solid var(--border-color); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+#sideArea input[type=range] { accent-color: var(--status-color); }
+#kCalibBox .sliderRow { gap: 6px; flex-wrap: wrap; }
+#kCalibBtn:disabled { opacity: .45; cursor: not-allowed; }
+#cmapSelect option { background-color: var(--input-bg); color: var(--text-color); }
+#cmapSelect option[value=im] { background: linear-gradient(to right, #000004, #4a06a5, #bc3754, #fcffa4); color: #000; }
+#cmapSelect option[value=vi] { background: linear-gradient(to right, #440154, #2a788e, #35b779, #fde725); color: #000; }
+#cmapSelect option[value=pl] { background: linear-gradient(to right, #0d0887, #7e03a8, #cc4778, #f0f921); color: #000; }
+#cmapSelect option[value=gs] { background: linear-gradient(to right, #fff, #000); color: #fff; }
+#cmapSelect option[value=dv] { background: linear-gradient(to right, #050532, #2850b4, #8CC8EB, #f5f5f5, #F0B48C, #C84628, #5A0505); color: #fff; }
+#kCalibHint { font-size: 11px; line-height: 1.35; opacity: .85; margin-top: 4px; }
+#toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(20px); background: var(--toolbar-bg); color: var(--text-color); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 18px; font-size: 13px; box-shadow: 0 6px 22px rgba(0,0,0,0.25); opacity: 0; pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 2000; max-width: 80vw; }
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+@media (max-width: 820px) {
+  #main { flex-direction: column; }
+  #plotArea { height: 52vh; height: 52dvh; flex: none; }
+  #sideArea { width: 100%; flex: 1; border-left: none; border-top: 1px solid var(--border-color); }
+  #fileInfo { order: 10; width: 100%; }
+}
+@media (pointer: coarse) {
+  /* larger tap targets on touch devices */
+  #toolbar button, #toolbar select, .sidePanel button { min-height: 34px; }
+  .slabBtns button, .avgRow button { min-width: 30px; min-height: 30px; }
+  .slabRow input[type=range], .sliderRow input[type=range] { height: 28px; }
+  #hProfileCanvas, #vProfileCanvas, #eProfileCanvas { height: 128px; }
+  #colorbar { height: 52px; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <h1>&#128300; NanoESCA 3D Viewer</h1>
+    <button onclick="loadFolder()" title="Open a measurement folder (FSA picker when available)">&#128194; Load Folder</button>
+    <button onclick="document.getElementById('fileInput').click()" title="Load individual .DAT and .TIF files">&#128196; Load Files</button>
+    <button onclick="loadDemoData()" title="Generate the built-in synthetic dataset">&#127916; Demo Data</button>
+    <button onclick="reset3dView()" title="Reset camera and slabs (R)">&#128260; Reset View</button>
+    <button onclick="savePNG()" title="Save the current 3D view as PNG">&#128444; Save as PNG</button>
+    <button id="themeBtn" onclick="toggleTheme()" title="Toggle dark mode" aria-label="Toggle dark mode">&#127769;</button>
+    <label>Colormap:
+      <select id="cmapSelect" onchange="changeColormap(this.value)" title="Colour map">
+        <option value="im">Inferno</option><option value="vi">Viridis</option><option value="pl">Plasma</option>
+        <option value="gs">White to Black</option><option value="dv">Navy-Red Diverging</option><option value="rainbow">Rainbow</option>
+      </select>
+    </label>
+    <label>Invert: <input type="checkbox" id="invertCheckbox" onchange="toggleInvert()"></label>
+    <label>Z-Range:
+      <input type="text" id="zminInput" style="width:64px" onchange="updateZRange()">
+      <span>to</span>
+      <input type="text" id="zmaxInput" style="width:64px" onchange="updateZRange()">
+    </label>
+    <button onclick="autoscale()">&#128200; Autoscale</button>
+    <span id="fileInfo">No data loaded</span>
+    <span id="status" role="status" aria-live="polite"></span>
+  </div>
+  <div id="main">
+    <div id="plotArea">
+      <div id="glWrap">
+        <canvas id="gl3dCanvas"></canvas>
+        <canvas id="glOverlayCanvas"></canvas>
+        <div id="glFallback">WebGL2 is not available in this browser; the 3D view is disabled. The 2D controls in the side panel still work.</div>
+      </div>
+      <div id="plotColorWrap">
+        <canvas id="colorbar"></canvas>
+        <div id="colorbarLabels"><span id="cbLo">-</span><span id="cbHi">-</span></div>
+      </div>
+    </div>
+    <div id="sideArea">
+      <div class="sidePanel">
+        <details id="helpBox">
+          <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--status-color)">&#8505;&#65039; How to use (tap to expand)</summary>
+          <div style="font-size:11.5px;line-height:1.5;margin-top:6px;opacity:.92">
+            <b>Load</b> a folder (<i>dld_his_tr_*.dat</i> + its .TIF slices) or press <b>Demo Data</b>.<br>
+            <b>3D view:</b> drag&nbsp;=&nbsp;rotate &#183; wheel&nbsp;=&nbsp;zoom &#183;
+            <span style="white-space:nowrap">right-drag</span>&nbsp;=&nbsp;pan &#183; double-click&nbsp;=&nbsp;reset.<br>
+            <span style="opacity:.8">Touch:</span> 1&nbsp;finger rotate &#183; 2&nbsp;fingers pinch-zoom&nbsp;+&nbsp;pan &#183; double-tap reset.<br>
+            <b>Slabs:</b> each of E / kx / ky is a cut plane. <b>Full</b>&nbsp;=&nbsp;whole axis,
+            <b>Plane</b>&nbsp;=&nbsp;single cut, <b>&#8722;/+</b>&nbsp;=&nbsp;band width. Once an axis is on
+            <b>Plane</b>, that cut follows the cursor.<br>
+            <b>Minimap:</b> shows the kx&#215;ky map at the <i>cursor</i> energy. Drag on it to move the (kx,ky) cursor.<br>
+            <b>Profiles:</b> drag a profile to move its cursor coordinate; the other two re-slice at the new point.<br>
+            <b>Colours:</b> drag the two handles on the colour bar to set the min/max shown;
+            double-click the bar to reset. <b>Gamma</b>&nbsp;(&lt;1) lifts faint signal;
+            <b>Percentile</b> sets a robust window (try 2 / 98).<br>
+            <b>Data:</b> <i>dI/dE</i> shows the energy-derivative (background cancels, edges/bands light up) &#8212; good for weak, near-Fermi features.<br>
+            <b>Keys:</b> &#8592;&#8594; E &#183; &#8593;&#8595; kx &#183; <kbd>[</kbd><kbd>]</kbd> ky &#183; <kbd>R</kbd> reset.
+          </div>
+        </details>
+      </div>
+      <div class="sidePanel">
+        <h3>3D Render</h3>
+        <div class="sliderRow"><span title="display gamma: <1 brightens weak signal, >1 darkens">Gamma</span>
+          <input type="range" id="gammaSlider" min="20" max="300" value="100" oninput="setGamma(this.value/100)">
+          <span class="sliderVal" id="gammaVal">1.00</span></div>
+        <div class="sliderRow"><span title="robust window from the data percentile">Percentile</span>
+          <input type="text" id="pctLo" style="width:44px" value="2" title="lower percentile">
+          <button onclick="applyPercentileWindow(parseFloat($('pctLo').value)||0, parseFloat($('pctHi').value)||100)" style="padding:4px 8px">Apply</button>
+          <input type="text" id="pctHi" style="width:44px" value="98" title="upper percentile">
+          <button onclick="applyPercentileWindow(0,100)" style="padding:4px 8px" title="full range">Full</button>
+        </div>
+        <div class="sliderRow">
+          <span title="raw intensity, or dI/dE energy-derivative contrast">Data</span>
+          <select id="dataMode" class="sel" onchange="setDataMode(this.value)" style="flex:1">
+            <option value="raw">Raw intensity</option>
+            <option value="dE">dI/dE (energy derivative)</option>
+          </select>
+        </div>
+        <div class="sliderRow">
+          <span>Mode</span>
+          <select id="renderMode" class="sel" onchange="setRenderMode(this.value)" style="flex:1">
+            <option value="volume">Volume (DVR)</option><option value="iso">Iso-surface</option><option value="mip">MIP (max projection)</option>
+          </select>
+        </div>
+        <div class="sliderRow"><span title="iso threshold (t of z-range)">Iso level</span>
+          <input type="range" id="isoSlider" min="1" max="99" value="55" oninput="setIsoT(this.value/100)">
+          <span class="sliderVal" id="isoVal">55%</span></div>
+        <div class="sliderRow"><span title="DVR opacity gain">Opacity</span>
+          <input type="range" id="gainSlider" min="5" max="60" value="30" oninput="setGain(this.value/10)">
+          <span class="sliderVal" id="gainVal">3.0</span></div>
+        <div class="sliderRow"><span>Ray steps</span>
+          <select id="stepsSelect" class="sel" onchange="setSteps(this.value)" style="flex:1">
+            <option value="160">Fast (160)</option><option value="256" selected>Balanced (256)</option><option value="384">Fine (384)</option>
+          </select>
+          <button id="playBtn" onclick="playEnergy()" style="padding:4px 9px" title="Animate the E slab">&#9654; Play E</button>
+        </div>
+      </div>
+      <div class="sidePanel">
+        <h3>Slabs (3D cuts)</h3>
+        <div class="slabRow" id="slabE"><span class="slabName">E</span>
+          <input type="range" id="ePosX" min="0" max="80" value="40" oninput="setSlab('E', +this.value)">
+          <span class="slabVal">-</span>
+          <span class="slabBtns"><button class="wMinus" title="narrow E band">&#8722;</button><button class="wPlus" title="widen E band">+</button></span>
+          <span class="wVal" id="eW">plane</span>
+          <span class="slabBtns"><button class="fullBtn">Full</button><button class="planeBtn">Plane</button></span>
+        </div>
+        <div class="slabRow" id="slabKx"><span class="slabName">kx</span>
+          <input type="range" id="kxPos" min="0" max="255" value="128" oninput="setSlab('kx', +this.value)">
+          <span class="slabVal">-</span>
+          <span class="slabBtns"><button class="wMinus">&#8722;</button><button class="wPlus">+</button></span>
+          <span class="wVal" id="kxW">&#177;6</span>
+          <span class="slabBtns"><button class="fullBtn">Full</button><button class="planeBtn">Plane</button></span>
+        </div>
+        <div class="slabRow" id="slabKy"><span class="slabName">ky</span>
+          <input type="range" id="kyPos" min="0" max="255" value="128" oninput="setSlab('ky', +this.value)">
+          <span class="slabVal">-</span>
+          <span class="slabBtns"><button class="wMinus">&#8722;</button><button class="wPlus">+</button></span>
+          <span class="wVal" id="kyW">&#177;6</span>
+          <span class="slabBtns"><button class="fullBtn">Full</button><button class="planeBtn">Plane</button></span>
+        </div>
+        <div style="font-size:11px;opacity:.75">Arrow keys / [ ] nudge E / kx / ky &#183; widths set the 3D cut thickness (the minimap always shows a single E plane)</div>
+      </div>
+      <div class="sidePanel">
+        <h3>Minimap &mdash; E = const (kx &times; ky)</h3>
+        <div id="miniWrap">
+          <canvas id="heatmapCanvas"></canvas>
+          <canvas id="overlayCanvas"></canvas>
+        </div>
+        <div id="miniInfo">-</div>
+      </div>
+      <div class="sidePanel">
+        <h3>Profiles (at crosshair)</h3>
+        <h3 style="font-size:11px;color:var(--text-color)" id="eProfTitle">E direction</h3>
+        <canvas class="profileCanvas" id="eProfileCanvas" style="height:96px"></canvas>
+        <h3 style="font-size:11px;color:var(--text-color)" id="hProfTitle">kx direction</h3>
+        <canvas class="profileCanvas" id="hProfileCanvas" style="height:96px"></canvas>
+        <div class="avgRow"><span>band ky</span><button id="avgHMinus">&#8722;</button><button id="avgHPlus">+</button></div>
+        <h3 style="font-size:11px;color:var(--text-color)" id="vProfTitle">ky direction</h3>
+        <canvas class="profileCanvas" id="vProfileCanvas" style="height:96px"></canvas>
+        <div class="avgRow"><span>band kx</span><button id="avgVMinus">&#8722;</button><button id="avgVPlus">+</button></div>
+      </div>
+      <div id="cursorInfo">
+        <div id="cursorText">Load a folder containing dld_his_tr_*.dat and its .TIF slices (or press Demo Data).</div>
+      </div>
+      <div class="sidePanel">
+        <h3>Metadata</h3>
+        <div class="kv" id="metaBox">-</div>
+      </div>
+      <div class="sidePanel">
+        <h3>k-space calibration (&Aring;&#8315;&#185;)</h3>
+        <div class="sliderRow">
+          <label><input type="checkbox" id="kEnable" checked onchange="updateK()"> show axes in k (&Aring;&#8315;&#185;)</label>
+        </div>
+        <div class="sliderRow"><span>radial map</span>
+          <select id="kRmap" class="sel" onchange="updateK()" style="flex:1">
+            <option value="angle">k = k&#8348;&middot;sin(&theta;) (angle linear)</option><option value="radius">k linear in radius</option>
+          </select>
+        </div>
+        <div class="sliderRow"><span title="multiplier on the angular half-cone">kScale</span>
+          <input type="range" id="kScale" min="0.02" max="1.5" step="0.005" value="1" oninput="updateK()">
+          <span class="sliderVal" id="kScaleVal">1.00</span></div>
+        <div class="sliderRow"><span title="manual maximum |k|; blank = model">k_max</span>
+          <input type="text" id="kMaxInput" style="width:74px" value="" placeholder="auto" onchange="updateK()">
+          <span style="font-size:11px;opacity:.7">&Aring;&#8315;&#185;</span></div>
+        <div class="sliderRow">
+          <button id="kCalibBtn" onclick="toggleCalibration()" style="padding:5px 9px;font-size:12px" title="Pick a known feature on the minimap to set the k scale">&#9873; Calibrate from feature</button>
+        </div>
+        <div id="kCalibBox" style="display:none">
+          <div class="sliderRow"><span>known |k|</span>
+            <input type="text" id="kKnownInput" style="width:74px" value="0.080" onchange="applyCalibration()">
+            <span style="font-size:11px;opacity:.7">&Aring;&#8315;&#185;</span>
+            <button onclick="applyCalibration()" style="padding:4px 8px">Apply</button>
+          </div>
+          <div id="kCalibHint" class="kv" style="max-height:none">Press the button, then click a known feature on the minimap (e.g. the Ag(111) surface state at ~0.08 &Aring;&#8315;&#185;). kScale will be solved so that point lands on the value above.</div>
+        </div>
+        <div class="kv" id="kInfo">-</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="toast" role="alert" aria-live="polite"></div>
+<div id="loadOverlay">
+  <div class="box"><div class="spinner"></div><div id="loadText">Loading...</div>
+  <div id="loadBarOuter"><div id="loadBar"></div></div></div>
+</div>
+<input type="file" id="dirInput" webkitdirectory directory multiple style="display:none">
+<input type="file" id="fileInput" multiple accept=".dat,.DAT,.tif,.TIF,.hist,.HIST" style="display:none">
+<input type="range" id="sliceSlider" min="0" max="80" value="40" style="display:none">
+<script>
+'use strict';
+
+const gl3d = document.getElementById('gl3dCanvas');
+const glo  = document.getElementById('glOverlayCanvas');
+const PREFS_KEY = 'nanoescaViewer3d.prefs.v1';
+const APP_VERSION = '1.0';
+
+/* ---- transplanted from NanoESCA Viewer 2.5 (2D viewer) ------------ */
+const $ = id => document.getElementById(id);
+const heatC = $('heatmapCanvas'), overC = $('overlayCanvas');
+const hctx = heatC.getContext('2d'), octx = overC.getContext('2d');
+const hProfC = $('hProfileCanvas'), vProfC = $('vProfileCanvas'), eProfC = $('eProfileCanvas');
+const cbC = $('colorbar');
+let offImg = null, offCv = null;   // offscreen image for zoom/pan
+let lastFailedFiles = [];          // v2: per-file decode failures of the last load
+
+
+function safeLS() {
+  try { return window.localStorage; } catch (e) { return null; }
+}
+function savePrefs() {
+  const ls = safeLS();
+  if (!ls) return;
+  try {
+    ls.setItem(PREFS_KEY, JSON.stringify({
+      ver: 2,
+      dark: document.body.classList.contains('dark-mode'),
+      cmap: S.cmap,
+      invert: S.invert,
+      kEnabled: K.enabled,
+      kScale: K.kScale,
+      manualKMax: K.manualKMax,
+      rmap: K.rmap,
+      gamma: S.gamma,
+      dataMode: S.dataMode
+    }));
+  } catch (e) { /* quota / blocked: prefs silently not saved */ }
+}
+function applyPrefs() {
+  const ls = safeLS();
+  if (!ls) return;
+  let p = null;
+  try { p = JSON.parse(ls.getItem(PREFS_KEY) || 'null'); } catch (e) { p = null; }
+  if (!p || p.ver !== 2) return;
+  try {
+    if (p.dark) { document.body.classList.add('dark-mode'); $('themeBtn').innerHTML = '&#9728;&#65039;'; }
+    if (p.cmap && CMAPS[p.cmap]) S.cmap = p.cmap;
+    if (typeof p.invert === 'boolean') { S.invert = p.invert; $('invertCheckbox').checked = p.invert; }
+    if (typeof p.gamma === 'number' && p.gamma > 0) { S.gamma = p.gamma; const gs = $('gammaSlider'); if (gs) gs.value = Math.round(p.gamma*100); const gv=$('gammaVal'); if (gv) gv.textContent = p.gamma.toFixed(2); }
+    if (p.dataMode === 'dE' || p.dataMode === 'raw') { S.dataMode = p.dataMode; const dm = $('dataMode'); if (dm) dm.value = p.dataMode; }
+    if (typeof p.kEnabled === 'boolean') { K.enabled = p.kEnabled; $('kEnable').checked = p.kEnabled; }
+    if (isFinite(p.kScale) && p.kScale > 0) {
+      K.kScale = p.kScale; $('kScale').value = K.kScale.toFixed(2);
+      const kv = $('kScaleVal'); if (kv) kv.textContent = K.kScale.toFixed(2);   // v2: keep the slider label in sync
+    }
+    if (isFinite(p.manualKMax) && p.manualKMax > 0) { K.manualKMax = p.manualKMax; $('kMaxInput').value = K.manualKMax.toFixed(4); }
+    if (p.rmap === 'angle' || p.rmap === 'radius') { K.rmap = p.rmap; $('kRmap').value = p.rmap; }
+  } catch (e) { console.warn('prefs restore skipped:', e); }
+}
+
+/* ------------------------------------------------------------------ */
+/*  TIFF decoder (subset: little/big-endian, uncompressed + Deflate,  */
+/*  PackBits, LZW; 8/16/32-bit gray incl. IEEE float32, strip-based    */
+/*  AND tile-based).  v2: pixel data now honours the file byte order.  */
+/* ------------------------------------------------------------------ */
+
+function decodeTIFF(buf) {
+  const dv = new DataView(buf);
+  if (buf.byteLength < 8) throw new Error("TIFF too small");
+  const b0 = dv.getUint8(0), b1 = dv.getUint8(1);
+  let le;
+  if (b0 === 0x49 && b1 === 0x49) le = true;
+  else if (b0 === 0x4D && b1 === 0x4D) le = false;
+  else throw new Error("Not a TIFF (bad byte order)");
+  const u16 = o => dv.getUint16(o, le);
+  const u32 = o => dv.getUint32(o, le);
+  if (u16(2) !== 42) throw new Error("Not a TIFF (bad magic)");
+
+  const readVals = (typ, cnt, valOff) => {
+    const sizes = { 1:1, 2:1, 3:2, 4:4, 5:8, 6:1, 7:1, 8:2, 9:4, 10:8, 11:4, 12:8, 16:8 };
+    const size = (sizes[typ] || 1) * cnt;
+    const base = size <= 4 ? valOff : u32(valOff);
+    const out = [];
+    for (let i = 0; i < cnt; i++) {
+      let v;
+      const o = base + i * (sizes[typ] || 1);
+      switch (typ) {
+        case 1: case 6: case 7: v = dv.getUint8(o); break;
+        case 2: v = dv.getUint8(o); break;
+        case 3: case 8: v = dv.getUint16(o, le); break;
+        case 4: case 9: case 11: v = dv.getUint32(o, le); break;
+        case 5: case 10: case 12:
+          v = dv.getUint32(o, le) / (dv.getUint32(o + 4, le) || 1); break;
+        case 16: v = Number(dv.getBigInt64(o, le)); break;
+        default: v = dv.getUint8(o);
+      }
+      out.push(v);
+    }
+    return out;
+  };
+
+  // Walk the IFD chain; keep the first image-bearing IFD
+  let ifdOff = u32(4);
+  let tags = null, guard = 0;
+  while (ifdOff && guard++ < 64) {
+    const n = u16(ifdOff);
+    const t = {};
+    for (let i = 0; i < n; i++) {
+      const e = ifdOff + 2 + i * 12;
+      const tag = u16(e), typ = u16(e + 2), cnt = u32(e + 4);
+      t[tag] = { typ, cnt, valOff: e + 8 };
+    }
+    if (t[256] && t[257]) { tags = t; break; }
+    ifdOff = u32(ifdOff + 2 + n * 12);
+  }
+  if (!tags) throw new Error("No image IFD found");
+
+  const get1 = (tag, dflt) => (tags[tag] ? readVals(tags[tag].typ, tags[tag].cnt, tags[tag].valOff)[0] : dflt);
+  const w = get1(256), h = get1(257);
+  const bits = get1(258, 8);
+  const compression = get1(259, 1);
+  // v2: removed the unused `photometric` parse (dead since v1).
+  const spp = get1(277, 1);
+  const compressionOK = [1, 5, 8, 32773, 32946].indexOf(compression) !== -1;
+  if (!compressionOK) throw new Error("Unsupported TIFF compression " + compression);
+  if (bits !== 8 && bits !== 16 && bits !== 32) throw new Error("Unsupported bit depth " + bits);
+
+  const rowBytes = Math.ceil((w * spp * bits) / 8);
+  const out = new Float32Array(w * h);
+  let maxVal = 1;
+
+  // v2: samples are read through a DataView so the file's byte order is
+  // honoured (v1 hard-coded little-endian); 32-bit IEEE-float samples
+  // (SampleFormat=3) are supported; truncated row data now throws (caught
+  // per-file upstream) instead of silently padding zeros.
+  const sampleFormat = get1(339, 1);          // 1=uint, 2=int, 3=IEEE float
+  const isFloat = (bits === 32 && sampleFormat === 3);
+  const rowDV = u8 => new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const putRow = (stripData, rowIndex) => {
+    if (rowIndex < 0 || rowIndex >= h) return;
+    const o = rowIndex * w;
+    if (bits === 16) {
+      const sv = rowDV(stripData);
+      for (let x = 0; x < w; x++) {
+        const v = sv.getUint16((x * spp) * 2, le);
+        out[o + x] = v; if (v > maxVal) maxVal = v;
+      }
+    } else if (bits === 32 && !isFloat) {
+      const sv = rowDV(stripData);
+      for (let x = 0; x < w; x++) {
+        const v = sv.getUint32(x * spp * 4, le);
+        out[o + x] = v; if (v > maxVal) maxVal = v;
+      }
+    } else if (bits === 32) {                // IEEE float32
+      const sv = rowDV(stripData);
+      for (let x = 0; x < w; x++) {
+        const v = sv.getFloat32(x * spp * 4, le);
+        out[o + x] = v; if (v > maxVal) maxVal = v;
+      }
+    } else {
+      for (let x = 0; x < w; x++) {
+        const s = stripData[x * spp];
+        if (s === undefined) throw new Error('truncated strip data');   // v2: fail loudly
+        out[o + x] = s;
+        if (s > maxVal) maxVal = s;
+      }
+    }
+  };
+
+  // v2: expectedLen parameter - per-strip PackBits/LZW data must only expand
+  // to the strip's own rows (v1 always sized the whole image).
+  const inflate = (u8, expectedLen) => {
+    const want = expectedLen || rowBytes * h;
+    if (compression === 1) return u8;
+    if (compression === 8 || compression === 32946) {
+      try {
+        return pakoUZlib(u8);
+      } catch (e) { throw new Error("zlib inflate failed: " + e.message); }
+    }
+    if (compression === 32773) return decodePackBits(u8, want);
+    if (compression === 5) return decodeLZW(u8, want);
+    return u8;
+  };
+
+  const strips = tags[273] ? readVals(tags[273].typ, tags[273].cnt, tags[273].valOff) : [];
+  const stripCounts = tags[279] ? readVals(tags[279].typ, tags[279].cnt, tags[279].valOff) : [];
+  const rowsPerStrip = get1(278, h);
+
+  if (strips.length) {
+    let row = 0;
+    for (let s = 0; s < strips.length; s++) {
+      const off = strips[s];
+      const len = stripCounts[s] || (buf.byteLength - off);
+      const nRows = Math.min(rowsPerStrip, h - row);
+      let raw = new Uint8Array(buf, off, len);
+      raw = inflate(raw, rowBytes * nRows);        // v2: per-strip expectation
+      for (let r = 0; r < nRows; r++) {
+        putRow(raw.subarray(r * rowBytes, (r + 1) * rowBytes), row + r);
+      }
+      row += nRows;
+      if (row >= h) break;
+    }
+  } else if (tags[324] || tags[322]) {
+    // tiled TIFF
+    const tw = get1(322, 256), th = get1(323, 256);
+    const toffs = tags[324] ? readVals(tags[324].typ, tags[324].cnt, tags[324].valOff) : [];
+    const tcounts = tags[325] ? readVals(tags[325].typ, tags[325].cnt, tags[325].valOff) : [];
+    const tilesX = Math.ceil(w / tw);
+    for (let ti = 0; ti < toffs.length; ti++) {
+      let raw = new Uint8Array(buf, toffs[ti], tcounts[ti] || (buf.byteLength - toffs[ti]));
+      const tileBytes = Math.ceil((tw * spp * bits) / 8) * th;   // v2: tile-sized
+      raw = inflate(raw, tileBytes);
+      const tx = (ti % tilesX) * tw, ty = Math.floor(ti / tilesX) * th;
+      const bpp = (bits / 8) * spp;
+      // v2: endian- and float-aware sample reads
+      const sv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+      const readPx = off => {
+        if (bits === 16) return sv.getUint16(off, le);
+        if (bits === 32) return isFloat ? sv.getFloat32(off, le) : sv.getUint32(off, le);
+        return raw[off];
+      };
+      for (let r = 0; r < th; r++) {
+        const y = ty + r;
+        if (y >= h) break;
+        for (let c = 0; c < tw; c++) {
+          const x = tx + c;
+          if (x >= w) break;
+          const v = readPx((r * tw + c) * bpp);
+          out[y * w + x] = v;
+          if (v > maxVal) maxVal = v;
+        }
+      }
+    }
+  } else {
+    throw new Error("TIFF has neither strips nor tiles");
+  }
+  return { width: w, height: h, data: out, maxVal };
+}
+
+/* --- Decompression helpers ------------------------------------------- */
+/*
+   The IMAQ TIFF writer stores the 512x512 uint16 pixels as a
+   zlib-wrapped Deflate stream (TIFF Compression = 32946).  The TIFF
+   decoder is synchronous, so we use a compact, self-contained pure-JS
+   inflater here (validated against zlib on real DLD-HIS-TR data).
+*/
+
+function pakoUZlib(u8) {
+  let p = 0;
+  const CMF = u8[p], FLG = u8[p + 1];
+  if ((CMF & 0x0f) !== 8) throw new Error('bad zlib CM');
+  if (((CMF << 8) | FLG) % 31 !== 0) throw new Error('bad zlib header check');
+  p = 2;
+  if (FLG & 0x20) p += 4;                  // preset dictionary (unused here)
+  const raw = u8.subarray(p);
+  return rawInflate(raw);
+}
+
+function rawInflate(raw) {
+  let bp = 0;
+  const out = [];
+  const getBit = () => { const b = (raw[bp >> 3] >> (bp & 7)) & 1; bp++; return b; };
+  const getBits = (n) => { let v = 0; for (let i = 0; i < n; i++) v |= getBit() << i; return v; };
+
+  // Canonical Huffman decoder: firstCode[l] = first canonical code of
+  // length l, count[l] = how many codes have length l, symOf[l] = the
+  // symbols of length l in canonical (increasing symbol number) order.
+  const buildHuff = (lengths) => {
+    let maxLen = 0;
+    for (let i = 0; i < lengths.length; i++) if (lengths[i] > maxLen) maxLen = lengths[i];
+    const count = new Array(maxLen + 1).fill(0);
+    for (let i = 0; i < lengths.length; i++) if (lengths[i]) count[lengths[i]]++;
+    const firstCode = new Array(maxLen + 1).fill(0);
+    let code = 0;
+    for (let i = 1; i <= maxLen; i++) { code = (code + count[i - 1]) << 1; firstCode[i] = code; }
+    const symOf = [];
+    for (let l = 0; l <= maxLen; l++) symOf.push([]);
+    for (let s = 0; s < lengths.length; s++) if (lengths[s]) symOf[lengths[s]].push(s);
+    return { maxLen, firstCode, count, symOf };
+  };
+
+  const decodeSym = (huff) => {
+    let code = 0, len = 0;
+    while (len < huff.maxLen) {
+      code = (code << 1) | getBit(); len++;
+      const fc = huff.firstCode[len], n = huff.count[len];
+      if (n > 0 && code >= fc && code < fc + n) return huff.symOf[len][code - fc];
+    }
+    throw new Error('bad huffman code');
+  };
+
+  const LENBASE  = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+  const LENEXT   = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+  const DISTBASE = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+  const DISTEXT  = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+
+  let fixedL = null, fixedD = null;
+  for (;;) {
+    const bfinal = getBit();
+    const btype = getBits(2);
+    if (btype === 0) {
+      bp = (bp + 7) & ~7;
+      const len = raw[bp >> 3] | (raw[(bp >> 3) + 1] << 8);
+      bp += 32;
+      for (let i = 0; i < len; i++) { out.push(raw[bp >> 3]); bp += 8; }
+    } else {
+      let litHuff, distHuff;
+      if (btype === 1) {
+        if (!fixedL) {
+          const ll = new Array(288);
+          for (let i = 0; i < 144; i++) ll[i] = 8;
+          for (let i = 144; i < 256; i++) ll[i] = 9;
+          for (let i = 256; i < 280; i++) ll[i] = 7;
+          for (let i = 280; i < 288; i++) ll[i] = 8;
+          fixedL = buildHuff(ll);
+          fixedD = buildHuff(new Array(30).fill(5));
+        }
+        litHuff = fixedL; distHuff = fixedD;
+      } else if (btype === 2) {
+        const HLIT = getBits(5) + 257, HDIST = getBits(5) + 1, HCLEN = getBits(4) + 4;
+        const ORDER = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+        const clens = new Array(19).fill(0);
+        for (let i = 0; i < HCLEN; i++) clens[ORDER[i]] = getBits(3);
+        const clHuff = buildHuff(clens);
+        const lens = [];
+        while (lens.length < HLIT + HDIST) {
+          const s = decodeSym(clHuff);
+          if (s < 16) lens.push(s);
+          else if (s === 16) { const r = 3 + getBits(2), p = lens.length ? lens[lens.length - 1] : 0; for (let i = 0; i < r; i++) lens.push(p); }
+          else if (s === 17) { const r = 3 + getBits(3); for (let i = 0; i < r; i++) lens.push(0); }
+          else { const r = 11 + getBits(7); for (let i = 0; i < r; i++) lens.push(0); }
+        }
+        litHuff = buildHuff(lens.slice(0, HLIT));
+        distHuff = buildHuff(lens.slice(HLIT));
+      } else throw new Error('bad deflate block type');
+      for (;;) {
+        const sym = decodeSym(litHuff);
+        if (sym === 256) break;
+        if (sym < 256) out.push(sym);
+        else {
+          const li = sym - 257;
+          if (li >= 29) throw new Error('bad length code');
+          const length = LENBASE[li] + getBits(LENEXT[li]);
+          const ds = decodeSym(distHuff);
+          const dist = DISTBASE[ds] + getBits(DISTEXT[ds]);
+          const start = out.length - dist;
+          if (start < 0) throw new Error('bad distance');
+          for (let i = 0; i < length; i++) out.push(out[start + i]);
+        }
+      }
+    }
+    if (bfinal) break;
+  }
+  return Uint8Array.from(out);
+}
+
+function decodePackBits(u8, expected) {
+  const out = new Uint8Array(expected);
+  let i = 0, o = 0;
+  while (i < u8.length && o < expected) {
+    const n = u8[i++] << 24 >> 24;              // signed byte
+    if (n >= 0) {
+      for (let k = 0; k <= n && o < expected && i < u8.length; k++) out[o++] = u8[i++];
+    } else if (n !== -128) {                    // -128 = no-op
+      const b = u8[i++];
+      for (let k = 0; k < 1 - n && o < expected; k++) out[o++] = b;
+    }
+  }
+  return out;
+}
+
+function decodeLZW(u8, expected) {
+  const out = new Uint8Array(expected);
+  let o = 0, bitPos = 0;
+  const CLEAR = 256, EOI = 257;
+  // dictionary as (prefix, byte, length) triples
+  const prefix = new Int32Array(4096);
+  const suffix = new Uint8Array(4096);
+  const entryLen = new Int32Array(4096);
+  let dictLen, codeLen, prev;
+  const reset = () => {
+    dictLen = 258; codeLen = 9; prev = -1;
+    for (let i = 0; i < 256; i++) { prefix[i] = -1; suffix[i] = i; entryLen[i] = 1; }
+    for (let i = 256; i < 4096; i++) { entryLen[i] = 0; }
+  };
+  reset();
+  const readCode = () => {
+    let code = 0;
+    for (let i = 0; i < codeLen; i++) {
+      const byte = u8[bitPos >> 3];
+      if (byte === undefined) return EOI;
+      code = (code << 1) | ((byte >> (7 - (bitPos & 7))) & 1);
+      bitPos++;
+    }
+    return code;
+  };
+  // expand a dictionary code into bytes (iterative, no recursion)
+  const seq = new Uint8Array(4096);
+  const expand = (code) => {
+    let len = entryLen[code], c = code;
+    for (let i = len - 1; i >= 0; i--) { seq[i] = suffix[c]; c = prefix[c]; }
+    return len;
+  };
+  for (;;) {
+    const code = readCode();
+    if (code === EOI) break;
+    if (code === CLEAR) { reset(); continue; }
+    if (prev < 0) {
+      if (code >= dictLen) break;
+      const l = expand(code);
+      for (let i = 0; i < l; i++) { if (o < expected) out[o++] = seq[i]; }
+      prev = code;
+      continue;
+    }
+    let firstByte;
+    if (code < dictLen) {
+      const l = expand(code);
+      firstByte = seq[0];
+      for (let i = 0; i < l; i++) { if (o < expected) out[o++] = seq[i]; }
+    } else {
+      // KwKwK case
+      const l = expand(prev);
+      firstByte = seq[0];
+      for (let i = 0; i < l; i++) { if (o < expected) out[o++] = seq[i]; }
+      if (o < expected) out[o++] = firstByte;
+    }
+    if (dictLen < 4096) {
+      prefix[dictLen] = prev;
+      suffix[dictLen] = firstByte;
+      entryLen[dictLen] = (entryLen[prev] || 1) + 1;
+      dictLen++;
+      if (dictLen === 512) codeLen = 10;
+      else if (dictLen === 1024) codeLen = 11;
+      else if (dictLen === 2048) codeLen = 12;
+    }
+    prev = code;
+    if (o >= expected) break;
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Decoder self-tests (v2)                                            */
+/* ------------------------------------------------------------------ */
+/*
+   Regression suite for the hand-rolled decoders, run via  ?selftest  in
+   the URL or  NanoESCAViewer.selfTest()  in the console. Every zlib
+   fixture below was produced by a REFERENCE zlib implementation (not by
+   this code): zlib.compress(b'ABC', 0) -> stored blocks (btype 0),
+   zlib.compress(..., 9) of repetitive data -> fixed-Huffman (btype 1),
+   and a varied text -> dynamic-Huffman (btype 2). The TIFF fixtures are
+   hand-built little/big-endian images whose pixel VALUES are endian-
+   asymmetric (a byte-swapped read cannot pass), and the LZW stream is a
+   hand-derived TIFF-LZW encoding of "ABABAB".
+*/
+
+function selfTest() {
+  const results = [];
+  const check = (name, ok, detail) => {
+    results.push({ name, ok: !!ok, detail: detail || '' });
+    console.log((ok ? 'PASS' : 'FAIL') + '  ' + name + (detail ? '  (' + detail + ')' : ''));
+  };
+
+  // ---- 1. zlib stored blocks (reference zlib level 0) -> b'ABC' ----------
+  (function () {
+    try {
+      const out = pakoUZlib(new Uint8Array([120, 1, 1, 3, 0, 252, 255, 65, 66, 67, 1, 141, 0, 199]));
+      const s = String.fromCharCode.apply(null, Array.from(out));
+      check('inflate.stored.ABC', s === 'ABC', 'got ' + JSON.stringify(s));
+    } catch (e) { check('inflate.stored.ABC', false, e.message); }
+  })();
+
+  // ---- 2. fixed-Huffman + back-references (reference zlib level 9) ------
+  // payload: b'SATUR'*12 + b'DAYNIGHT '*12  (168 bytes)
+  (function () {
+    try {
+      const stream = new Uint8Array([120, 218, 11, 118, 12, 9, 13, 10, 38, 143, 112, 113, 140, 244, 243, 116, 247, 8, 81, 160, 3, 3, 0, 115, 178, 48, 85]);
+      const out = pakoUZlib(stream);
+      const want = 'SATURDAYNIGHT SATURDAYNIGHT SATURDAYNIGHT SATURDAYNIGHT ';
+      let ok = out.length === 168;
+      if (ok) {
+        // verify locality: positions 0..4 'SATUR', the repeats decode to the right bytes
+        const w = [83, 65, 84, 85, 82];
+        for (let i = 0; i < 5; i++) if (out[i] !== w[i]) { ok = false; break; }
+        // payload tail: b'DAYNIGHT ' repeated; last byte is a space (32)
+        if (ok && out[167] !== 32) ok = false;
+      }
+      check('inflate.fixed.repeat', ok, 'len=' + out.length);
+    } catch (e) { check('inflate.fixed.repeat', false, e.message); }
+  })();
+
+  // ---- 3. dynamic-Huffman (reference zlib level 9) ----------------------
+  // payload: 'NanoESCA momentum microscope: 000 017 034 051 ...' (390 bytes)
+  (function () {
+    try {
+      const stream = new Uint8Array([120, 218, 13, 207, 185, 109, 20, 0, 16, 64, 209, 86, 126, 9, 115, 31, 100, 22, 34, 117, 226, 10, 144, 229, 128, 96, 189, 8, 76, 255, 204, 235, 224, 189, 254, 252, 124, 254, 120, 251, 254, 194, 227, 249, 248, 248, 252, 250, 247, 224, 241, 235, 253, 207, 243, 239, 251, 243, 247, 199, 55, 68, 4, 209, 70, 60, 144, 84, 164, 6, 153, 68, 197, 80, 93, 212, 11, 77, 71, 91, 208, 105, 76, 2, 51, 197, 124, 176, 76, 172, 13, 155, 197, 165, 112, 115, 60, 4, 207, 198, 59, 240, 85, 66, 134, 176, 36, 194, 136, 92, 162, 139, 88, 39, 85, 72, 107, 50, 130, 44, 37, 123, 200, 77, 74, 141, 178, 165, 162, 168, 114, 106, 132, 218, 166, 53, 104, 87, 58, 134, 174, 164, 199, 232, 93, 70, 139, 113, 103, 82, 152, 106, 102, 130, 21, 101, 117, 88, 79, 54, 141, 173, 101, 167, 238, 234, 136, 221, 215, 239, 155, 247, 237, 251, 206, 220, 245, 190, 118, 95, 191, 111, 222, 183, 239, 187, 114, 215, 251, 218, 125, 227, 190, 121, 223, 190, 239, 218, 93, 239, 107, 247, 141, 251, 214, 125, 251, 190, 27, 132, 222, 215, 238, 27, 247, 173, 251, 246, 125, 183, 238, 234, 252, 7, 172, 215, 77, 51]);
+      const out = pakoUZlib(stream);
+      const head = 'NanoESCA momentum microscope: ';
+      let ok = out.length === 390;
+      if (ok) {
+        for (let i = 0; i < head.length; i++) if (out[i] !== head.charCodeAt(i)) { ok = false; break; }
+      }
+      check('inflate.dynamic.mixed', ok, 'len=' + out.length);
+    } catch (e) { check('inflate.dynamic.mixed', false, e.message); }
+  })();
+
+  // ---- 4. zip header validation ------------------------------------------
+  (function () {
+    try {
+      let threwBadCM = false, threwBadCheck = false;
+      try { pakoUZlib(new Uint8Array([0x79, 0x01])); } catch (e) { threwBadCM = true; }
+      try { pakoUZlib(new Uint8Array([0x78, 0x02])); } catch (e) { threwBadCheck = true; }
+      check('zlib.headerValidation', threwBadCM && threwBadCheck);
+    } catch (e) { check('zlib.headerValidation', false, e.message); }
+  })();
+
+  // ---- 5. PackBits: literal run then repeat run --------------------------
+  (function () {
+    try {
+      const literals = [];
+      for (let i = 0; i < 20; i++) literals.push(65 + (i % 26));   // 20 distinct bytes
+      const data = new Uint8Array([19].concat(literals, [0xD9, 0x5A]));   // 0x5A='Z', 40 copies
+      const out = decodePackBits(data, 60);
+      let ok = out.length === 60;
+      ok = ok && out[0] === literals[0] && out[19] === literals[19];
+      ok = ok && out[20] === 0x5A && out[59] === 0x5A;
+      let zs = 0; for (let i = 0; i < 60; i++) if (out[i] === 0x5A) zs++;
+      check('packbits.literalAndRun', ok && zs === 40, 'zs=' + zs + ' len=' + out.length);
+    } catch (e) { check('packbits.literalAndRun', false, e.message); }
+  })();
+
+  // ---- 6. LZW (TIFF flavour, hand-derived) --------------------------------
+  // Clear(256), 65, 66, 258(=AB), 258(=AB), EOI(257)  ->  "ABABAB"
+  (function () {
+    try {
+      const stream = new Uint8Array([128, 16, 72, 80, 40, 20, 4]);
+      const out = decodeLZW(stream, 6);
+      let ok = out.length === 6;
+      if (ok) {
+        const w = [65, 66, 65, 66, 65, 66];
+        for (let i = 0; i < 6; i++) if (out[i] !== w[i]) { ok = false; break; }
+      }
+      check('lzw.ababab', ok, 'len=' + out.length + ' data=' + Array.from(out).join(','));
+    } catch (e) { check('lzw.ababab', false, e.message); }
+  })();
+
+  // ---- 7. minimal TIFF, both byte orders, endian-asymmetric pixels --------
+  // pixels 0x0102 0xBEEF 0x7FFF 0x8001: a byte-swapped read cannot match.
+  (function () {
+    const build = le => {
+      const buf = new ArrayBuffer(200);
+      const dv = new DataView(buf);
+      const u16 = (o, v) => le ? dv.setUint16(o, v, true) : dv.setUint16(o, v, false);
+      const u32 = (o, v) => le ? dv.setUint32(o, v, true) : dv.setUint32(o, v, false);
+      const m = le ? [0x49, 0x49] : [0x4D, 0x4D];   // II / MM
+      dv.setUint8(0, m[0]); dv.setUint8(1, m[1]);
+      u16(2, 42);
+      u32(4, 8);                                    // IFD at offset 8
+      u16(8, 6);                                    // 6 tags
+      let e = 10;
+      const w16 = (o, v) => u16(o, v), w32 = (o, v) => u32(o, v);
+      w16(e, 256); w16(e + 2, 3); w32(e + 4, 1); w16(e + 8, 4); e += 12;   // width 4
+      w16(e, 257); w16(e + 2, 3); w32(e + 4, 1); w16(e + 8, 1); e += 12;   // height 1
+      w16(e, 258); w16(e + 2, 3); w32(e + 4, 1); w16(e + 8, 16); e += 12;  // bits 16
+      w16(e, 259); w16(e + 2, 3); w32(e + 4, 1); w16(e + 8, 1); e += 12;   // compression none
+      w16(e, 273); w16(e + 2, 4); w32(e + 4, 1); w32(e + 8, 92); e += 12;  // strip offset
+      w16(e, 279); w16(e + 2, 4); w32(e + 4, 1); w32(e + 8, 8); e += 12;  // strip bytecount
+      w32(e, 0);                                                            // next IFD = 0
+      const px = [0x0102, 0xBEEF, 0x7FFF, 0x8001];
+      for (let x = 0; x < 4; x++) u16(92 + x * 2, px[x]);
+      return buf;
+    };
+    (['little-endian', 'big-endian']).forEach((name, i) => {
+      try {
+        const img = decodeTIFF(build(i === 0));
+        const d = img.data;
+        const want = [0x0102, 0xBEEF, 0x7FFF, 0x8001];
+        const ok = img.width === 4 && img.height === 1 &&
+          d[0] === want[0] && d[1] === want[1] && d[2] === want[2] && d[3] === want[3];
+        check('tiff.' + name + '.u16', ok, 'data=' + Array.from(d).join(','));
+      } catch (err) { check('tiff.' + name + '.u16', false, err.message); }
+    });
+  })();
+
+  // ---- 8. parseDAT: minimal dataset ---------------------------------------
+  (function () {
+    try {
+      const text = '[HEAD]\nFILE_ID="PRONANOESCA EXPDAT 4"\nAXIS_NAME="E-EF"\nAXIS_START=-0.5\nAXIS_STOP=0.5\nAXIS_STEP=0.25\nAXIS_N=5\n'
+        + '[SCAN_01]\n-0.50\t0\t0\t0\t0.000\t0.000\t0.000\t0.000\t12\t0\t0\t"SLICE_001.TIF"\n';
+      const parsed = parseDAT(text);
+      const ok = parsed.head.FILE_ID === 'PRONANOESCA EXPDAT 4'
+        && parsed.scan.length === 1
+        && parsed.scan[0].tif === 'SLICE_001.TIF'
+        && parsed.scan[0].energy === -0.5
+        && parsed.axisEnergies.length === 5
+        && Math.abs(parsed.axisEnergies[2] - 0) < 1e-9;
+      check('parseDAT.minimal', ok);
+    } catch (e) { check('parseDAT.minimal', false, e.message); }
+  })();
+
+  // ---- 9. energyAt: shared axis helper -----------------------------------
+  (function () {
+    try {
+      const old = { nE: S.nE, energies: S.energies };
+      S.nE = 5; S.energies = [0, 1, 2, 3, 4];
+      const ok = energyAt(0) === 0 && energyAt(2.5) === 2.5 && energyAt(-1) === 0 && energyAt(9) === 4;
+      S.nE = old.nE; S.energies = old.energies;   // restore
+      check('energyAt.linear', ok);
+    } catch (e) { check('energyAt.linear', false, e.message); }
+  })();
+
+  const nFail = results.filter(r => !r.ok).length;
+  console.log('Self-test: ' + (results.length - nFail) + '/' + results.length + ' passed' + (nFail ? ' \u2014 FAILURES' : ''));
+  return results;
+}
+
+/* ------------------------------------------------------------------ */
+/*  .DAT parser (Pro-NanoESCA EXPDAT)                                  */
+/* ------------------------------------------------------------------ */
+
+function parseDAT(text) {
+  const head = {};
+  const scan = [];           // {energy, tif}
+  let section = null;
+  const lines = text.split(/\r\n|\n|\r/);
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith('[') && line.endsWith(']')) { section = line; continue; }
+    if (section === '[HEAD]' || section === null) {
+      const eq = line.indexOf('=');
+      if (eq > 0) {
+        const k = line.slice(0, eq).trim();
+        let v = line.slice(eq + 1).trim();
+        if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
+        head[k] = v;
+        continue;
+      }
+    }
+    if (section && section.startsWith('[SCAN')) {
+      const cols = raw.split('\t');
+      if (cols.length < 10) continue;
+      const energy = parseFloat(cols[0]);
+      let tif = '', tifCol = null;
+      for (let i = cols.length - 1; i >= 8; i--) {
+        const c = cols[i].replace(/^"|"$/g, '').trim();
+        if (/\.tiff?$/i.test(c)) { tif = c; tifCol = i; break; }
+      }
+      if (!tif) continue;
+      // v2: dropped the unused "counts" column heuristic (dead data).
+      scan.push({ energy, tif });
+    }
+  }
+  const start = parseFloat(head.AXIS_START);
+  const stop = parseFloat(head.AXIS_STOP);
+  const step = parseFloat(head.AXIS_STEP);
+  const n = parseInt(head.AXIS_N, 10);
+  // ensure each scan entry has an energy; if the table lacked energy use axis ramp
+  let energies = scan.map(s => s.energy).filter(v => Number.isFinite(v));
+  const axisEnergies = [];
+  if (Number.isFinite(start) && Number.isFinite(stop) && Number.isFinite(n) && n > 1) {
+    const d = Number.isFinite(step) ? step : (stop - start) / (n - 1);
+    for (let i = 0; i < n; i++) axisEnergies.push(start + i * d);
+  }
+  return { head, scan, axisEnergies };
+}
+
+function parseHIST(text) {
+  const out = {};
+  const lines = text.split(/\r\n|\n|\r/);
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('[')) continue;
+    const eq = line.indexOf('=');
+    if (eq > 0) out[line.slice(0, eq).trim()] = line.slice(eq + 1).trim().replace(/^"|"$/g, '');
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Global viewer state                                                */
+/* ------------------------------------------------------------------ */
+
+const S = {
+  // dimensions + data
+  cube: null,        // Float32Array, layout [nE][ny][nx]  (raw intensities)
+  viewCube: null,    // the cube the views render (raw, or the dI/dE derivative)
+  _dE: null,         // cached dI/dE cube
+  dataMode: 'raw',   // 'raw' | 'dE'
+  nE: 0, ny: 0, nx: 0,
+  energies: [],      // energy axis (eV) - or slice indices when energyIsIndex is set
+  energyIsIndex: false,
+  head: {}, hist: {},
+
+  // load / view state
+  hasData: false,
+  cmap: 'inferno', invert: false,
+  gamma: 1.0,        // display transfer exponent (<1 brightens faint signal)
+  zmin: null, zmax: null, dataMin: null, dataMax: null,
+  playing: false,
+  cut: 'E',          // 'E' | 'kx' | 'ky'
+
+  // slabs / cursor
+  slabPos: { E: 40, kx: 128, ky: 128 },
+  slabW:   { E: 0,  kx: 6,   ky: 6   },   // half-widths (0 = single plane)
+  cursorI: -1, cursorJ: -1,               // kx / ky cursor index
+  cursorE: -1,                            // energy cursor index
+  calibPoint: null,                       // {i,j} of the last calibration pick
+  crosshairOn: false,
+
+  // physical-units mirror + averaging help (populated by the loaders)
+  phys: { E: null, kx: null, ky: null },
+  avgX: 0, avgY: 0,
+  avgWidth: { E: 0, kx: 0, ky: 0 },
+};
+
+// --- unified slice control: one bar whose meaning depends on the mode -----
+// In E mode the bar edits the energy index; in kx/ky mode it edits the cut
+// position.  These helpers read the single #sliceSlider accordingly.
+function isCutMode() { return S.cut === 'kx' || S.cut === 'ky'; }
+// v2: v1's ternary branches were identical. In E mode the slider is truly
+// an energy index; in cut mode it is the cut position and this accessor is
+// only used by code paths that are E-mode-only (guarded by !dispIsCut()).
+function sliceEnergyIndex() {
+  return parseInt($('sliceSlider').value, 10) || 0;
+}
+function sliceCutIndex() { return parseInt($('sliceSlider').value, 10) || 0; }
+
+
+/* ------------------------------------------------------------------ */
+/*  k-space (momentum) calibration                                     */
+/* ------------------------------------------------------------------ */
+/*
+   A momentum microscope images the angular distribution of the emitted
+   electrons, so each detector pixel maps to an emission angle theta and
+
+       k_parallel = k_total * sin(theta),
+       k_total    = 0.5123 * sqrt(E_kin)   [Angstrom^-1],  E_kin in eV.
+
+   E_kin = E_PH - W_ANA (photon energy minus analyser work function).
+
+   The angular scale (degrees per detector pixel) is set by the electrostatic
+   lens magnifications M_FOV / M_P and the detector geometry.  Those are
+   proprietary instrument settings with no published closed-form constant, so
+   we compute a *plausible* scale from M_FOV and expose
+
+       K.kScale  - overall multiplier applied to the M_FOV-derived angle
+                   (default 1.0; tune it so a known feature lands on its
+                   literature k value),
+       K.kMax    - manual override of the maximum |k| at the detector edge
+                   (Angstrom^-1).  When set (>0) it wins over the M_FOV model.
+
+   All geometry is expressed per detector pixel so arbitrary ROI sizes work.
+*/
+
+const K = {
+  enabled: true,
+  kTotal: 0,        // Angstrom^-1
+  thetaMax: 0,      // half-cone angle at the detector edge (radians)
+  kMax: 0,          // max |k| at detector edge (Angstrom^-1)
+  kScale: 1.0,      // user multiplier on the M_FOV-derived angle
+  manualKMax: 0,    // >0 : user-supplied kMax, overrides the model
+  rmap: 'angle',    // 'angle' = k_total*sin(theta); 'radius' = linear in k
+  cx: 0.5, cy: 0.5, // detector centre in fractional image coords
+};
+
+// v2: simplified. The full-cone model (theta_max = 90 deg at the detector
+// edge) is what this viewer was tuned against; refine it with kScale or the
+// k_max override. The M_FOV-scaled fallback that used to sit below the early
+// return was unreachable and has been removed.
+function zhalfFromFOV() {
+  return Math.PI / 2;
+}
+
+function computeKCalibration() {
+  const h = S.head || {};
+  const E_ph = Number(h.E_PH);
+  const W = Number(h.W_ANA);
+  let Ekin = NaN;
+  if (isFinite(E_ph)) Ekin = E_ph - (isFinite(W) ? W : 0);
+  K.kTotal = isFinite(Ekin) && Ekin > 0 ? 0.5123 * Math.sqrt(Ekin) : 0;
+
+  // if the energy axis itself is kinetic energy we could refine, but the AXIS
+  // here is E-EF; the photon energy + work function give E_kin reliably.
+  const half = zhalfFromFOV() * K.kScale;
+  K.thetaMax = half;
+  const kEdge = K.kTotal > 0 ? K.kTotal * Math.sin(Math.min(half, Math.PI / 2)) : NaN;
+  K.kMax = (K.manualKMax > 0) ? K.manualKMax : kEdge;
+  return K.kMax;
+}
+
+// Map a pixel index (0..n-1) to a k value in Angstrom^-1, along the x or y axis.
+function pixelToK(idx, n, axis) {
+  if (!K.enabled || !isFinite(K.kMax) || K.kMax <= 0) return idx; // pixel fallback
+  const c = (axis === 'x' ? K.cx : K.cy) * (n - 1);
+  const d = idx - c;                      // pixels from centre
+  const half = (n - 1) / 2;               // pixels from centre to edge
+  const frac = half > 0 ? d / half : 0;   // -1 .. +1 at edges
+  if (K.rmap === 'radius' || K.kTotal <= 0) {
+    // detector radius is proportional to |k| (linear k-space imaging)
+    return frac * K.kMax;
+  }
+  // angle is distributed linearly across the detector; k = k_total*sin(theta)
+  const theta = Math.asin(Math.min(1, frac * Math.sin(K.thetaMax)));
+  return K.kTotal * Math.sin(theta);
+}
+function kAxisLabel(axis) {
+  return K.enabled && isFinite(K.kMax) && K.kMax > 0 ? ('k' + axis + ' (\u00C5\u207B\u00B9)') : ('k' + axis + ' (pixel)');
+}
+function formatKAxis(v) {
+  if (!K.enabled || !isFinite(K.kMax) || K.kMax <= 0) return String(Math.round(v));
+  return (Math.round(v * 1000) / 1000).toFixed(3);
+}
+
+/* ---- shared axis helpers (v2: single source of truth) -------------------- */
+// Fractional axis index -> value on the energy axis (linear interpolation
+// between samples). v1 hand-copied this predicate four times.
+
+function energyAt(idx) {
+  if (!S.nE) return 0;
+  const t = Math.max(0, Math.min(S.nE - 1, idx));
+  const e0 = Math.floor(t), e1 = Math.min(S.nE - 1, e0 + 1), f = t - e0;
+  const v0 = S.energies[e0], v1 = S.energies[e1];
+  if (v0 === undefined) return e0;
+  if (v1 === undefined) return v0;
+  return v0 + (v1 - v0) * f;
+}
+// The scan axis may be a genuine energy ramp (eV) or a plain slice number.
+function energyUnit() { return S.energyIsIndex ? '' : ' eV'; }
+function energyAxisName() { return S.energyIsIndex ? 'Slice index' : (S.head.AXIS_NAME || 'E'); }
+// Physical value on ANY display axis kind ('E' | 'kx' | 'ky') at a data index.
+function axisValueAt(kind, idx) {
+  if (kind === 'E') return energyAt(idx);
+  const km = K.enabled && isFinite(K.kMax) && K.kMax > 0;
+  if (kind === 'kx') return km ? pixelToK(idx, S.nx, 'x') : idx;
+  if (kind === 'ky') return km ? pixelToK(idx, S.ny, 'y') : idx;
+  return idx;
+}
+const CMAPS = {};
+function lerp(a, b, t) { return a + (b - a) * t; }
+function ramp(stops) {
+  return function (t) {
+    t = Math.max(0, Math.min(1, t));
+    const x = t * (stops.length - 1);
+    const i = Math.min(stops.length - 2, Math.floor(x));
+    const f = x - i;
+    const c0 = stops[i], c1 = stops[i + 1];
+    return [lerp(c0[0], c1[0], f), lerp(c0[1], c1[1], f), lerp(c0[2], c1[2], f)];
+  };
+}
+CMAPS.inferno = ramp([[0,0,4],[22,11,57],[66,10,104],[106,23,110],[147,38,103],[188,55,84],[221,81,58],[243,120,25],[252,165,10],[246,215,70],[252,255,164]]);
+CMAPS.viridis = ramp([[68,1,84],[72,40,120],[62,74,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[109,205,89],[180,222,44],[253,231,37]]);
+CMAPS.plasma = ramp([[13,8,135],[75,3,161],[125,3,168],[168,34,150],[203,70,121],[229,107,93],[248,148,65],[253,195,40],[240,249,33]]);
+CMAPS.grayscale = ramp([[255,255,255],[0,0,0]]); // white -> black (as in reference viewer)
+CMAPS.diverging = ramp([[5,5,50],[40,80,180],[140,200,235],[245,245,245],[240,180,140],[200,70,40],[90,5,5]]);
+// v2: optional rainbow ramp (gist_rainbow-like) - conventional in ARPES papers.
+CMAPS.rainbow = ramp([[0,0,4],[27,71,254],[0,216,255],[127,255,127],[255,255,0],[255,127,0],[255,27,27],[120,0,0]]);
+
+/* ------------------------------------------------------------------ */
+/*  DOM helpers                                                        */
+/* ------------------------------------------------------------------ */
+
+function status(msg) { $('status').textContent = msg || ''; }
+function setProgress(p, text) {
+  $('loadBar').style.width = Math.round(p * 100) + '%';
+  if (text) $('loadText').textContent = text;
+}
+
+/* v2: small non-blocking notifications (replaces the v1 alert()). */
+let toastTimer = null;
+function toast(msg, ms) {
+  const t = $('toast');
+  if (!t) return;
+  t.textContent = msg || '';
+  t.classList.add('show');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), ms || 4000);
+}
+
+/* ------------------------------------------------------------------ */
+/*  File loading                                                       */
+/* ------------------------------------------------------------------ */
+/* v2: Load Folder prefers the File System Access API (Chromium) and falls
+   back to <input webkitdirectory>. The input path is unchanged. */
+
+async function loadFolder() {
+  if (window.showDirectoryPicker) {
+    try {
+      const dir = await window.showDirectoryPicker();
+      const files = [];
+      const walk = async (handle, depth) => {
+        if (depth > 6 || files.length > 4000) return;    // safety limits
+        for await (const entry of handle.values()) {
+          if (entry.kind === 'file') files.push(await entry.getFile());
+          else if (files.length <= 4000) await walk(entry, depth + 1);
+        }
+      };
+      await walk(dir, 0);
+      if (!files.length) { toast('That folder contains no files.'); return; }
+      handleFileList(files);
+      return;
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;       // user cancelled
+      console.warn('showDirectoryPicker unavailable, falling back:', err);
+    }
+  }
+  $('dirInput').click();
+}
+
+
+/* ---- loader tails + cursor readout ------------------------------ */
+/* ---- data modes: raw intensity vs dI/dE (energy derivative) ---------- */
+/* dI/dE cancels the smooth energy background and highlights what CHANGES
+   along energy (dispersing bands, the Fermi edge). Applied forward-difference
+   along E, then made non-negative so the colour/opacity transfer keeps working. */
+function computeDerivativeCube(src, nE, ny, nx){
+  const out = new Float32Array(src.length);
+  const plane = ny*nx;
+  for (let e=0; e<nE; e++){
+    const b = e*plane;
+    const bp = (e>0 ? (e-1) : e)*plane;      // previous plane (repeat first at e=0)
+    for (let k=0;k<plane;k++){
+      const d = src[b+k] - src[bp+k];
+      out[b+k] = d > 0 ? d : 0;              // keep the rising part (edges/bands)
+    }
+  }
+  return out;
+}
+function buildViewCube(){
+  if (!S.cube){ S.viewCube = null; return; }
+  if (S.dataMode === 'dE'){
+    if (!S._dE || S._dE.length !== S.cube.length){
+      S._dE = computeDerivativeCube(S.cube, S.nE|0, S.ny|0, S.nx|0);
+    }
+    S.viewCube = S._dE;
+  } else {
+    S.viewCube = S.cube;
+  }
+  // recompute the data extent + display window for the active cube
+  const c = S.viewCube, N = c.length, step = Math.max(1, (N/200000)|0);
+  let mn=Infinity, mx=-Infinity;
+  for (let i=0;i<N;i+=step){ const v=c[i]; if (v<mn) mn=v; if (v>mx) mx=v; }
+  if (!isFinite(mn)){ mn=0; mx=1; }
+  if (!(mx>mn)) mx = mn + 1e-9;
+  S.dataMin = mn; S.dataMax = mx;
+  S.zmin = null; S.zmax = null;      // let the range auto-fit the new cube
+  try { const sl = miniSlice(); if (sl){ const r = currentZRangeFor(sl); S.zmin = r[0]; S.zmax = r[1]; } } catch(_){}
+  const zi=$('zminInput'), zx=$('zmaxInput');
+  if (zi) zi.value = ''; if (zx) zx.value = '';
+}
+function refreshAllViews(){
+  V3.needsUpload = true;
+  if (V3.gl){ try { lutUpload(); } catch(_){} }
+  drawMini(); drawMiniOverlay(); drawProfiles3d(); updateCursorInfo3d();
+  drawColorbar(S.zmin, S.zmax);
+  if (typeof requestRender === 'function') requestRender();
+}
+function setDataMode(mode){
+  const m = (mode === 'dE') ? 'dE' : 'raw';
+  if (m === S.dataMode && S.viewCube) return;
+  S.dataMode = m;
+  if (!S.hasData) return;
+  buildViewCube();
+  refreshAllViews();
+  status(m === 'dE' ? 'dI/dE mode: showing energy-derivative contrast' : 'Raw intensity mode');
+}
+function afterLoad3d(datName, decoded, total){
+  const nE=S.nE|0, ny=S.ny|0, nx=S.nx|0;
+  $('fileInfo').textContent = datName + '  \u2014  ' + nE + ' slices \u00d7 ' + ny + ' \u00d7 ' + nx +
+    '  (' + (nE*ny*nx/1e6).toFixed(1) + 'M px)';
+  try { showMetadata(datName, decoded, total); } catch(e){ console.warn('showMetadata', e); }
+  try { computeKCalibration(); updateKInfo(); } catch(e){ console.warn('k-calib', e); }
+  S.slabPos={E:nE>>1, kx:nx>>1, ky:ny>>1};
+  S.slabW={E:0, kx:Math.min(6,(nx-1)>>1), ky:Math.min(6,(ny-1)>>1)};
+  S.cursorI=nx>>1; S.cursorJ=ny>>1; S.cursorE=nE>>1; S.calibPoint=null;
+  for (const id of ['ePosX','kxPos','kyPos']){ const el=$(id); if (el){ el.max=Math.max(0,(id==='ePosX'?nE:id==='kxPos'?nx:ny)-1); } }
+  V3.needsUpload=true;
+  // All slabs start FULL -> the 3D view shows the whole volume (no clipping).
+  // The minimap samples a single energy plane at the cursor, independently of
+  // these clip widths, so E full here does NOT average the minimap.
+  S.slabW.E = (nE-1)>>1;
+  S.slabW.kx = (nx-1)>>1;
+  S.slabW.ky = (ny-1)>>1;
+  setSlab('kx', nx>>1); setSlab('ky', ny>>1); setSlab('E', nE>>1);
+  S._dE = null;   // invalidate any cached derivative for the new dataset
+  const gs = $('gammaSlider'); if (gs && S.gamma!=null) gs.value = Math.round(S.gamma*100);
+  // Build the active view cube (raw, or the cached dI/dE derivative) and derive
+  // its data extent + display window.
+  buildViewCube();
+  if (V3.gl){ lutUpload(); glRender(); drawGLOverlay(); }
+  drawMini(); drawMiniOverlay(); drawProfiles3d(); updateCursorInfo3d();
+  const sl=miniSlice(); if (sl){ const r=currentZRangeFor(sl); S.zmin=r[0]; S.zmax=r[1]; }
+  drawColorbar(S.zmin, S.zmax);
+  const ov=$('loadOverlay'); if (ov) ov.style.display='none';
+}
+function updateCursorInfo3d(){
+  const el=$('cursorText'); if(!el) return;
+  if (!S.hasData){ el.textContent='Load a folder containing dld_his_tr_*.dat and its .TIF slices (or press Demo Data).'; return; }
+  const i=Math.max(0,S.cursorI|0), j=Math.max(0,S.cursorJ|0);
+  const ku=(typeof K!=='undefined' && K.enabled && K.kMax>0);
+  const eIdx = (S.cursorE!=null && S.cursorE>=0) ? (S.cursorE|0) : (S.slabPos.E|0);
+  const kx=slabVal('kx',i), ky=slabVal('ky',j), E=slabVal('E', eIdx);
+  el.textContent =
+    'E  = ' + fmtNum(E) + ' ' + energyUnit() + '   (idx '+eIdx+'/'+Math.max(0,(S.nE|0)-1)+')\n' +
+    'kx = ' + (ku? (typeof kx==='number'? kx.toFixed(3):kx)+' \u00C5\u207B\u00B9' : i+' px') + '   (idx '+i+'/'+Math.max(0,(S.nx|0)-1)+')\n' +
+    'ky = ' + (ku? (typeof ky==='number'? ky.toFixed(3):ky)+' \u00C5\u207B\u00B9' : j+' px') + '   (idx '+j+'/'+Math.max(0,(S.ny|0)-1)+')\n' +
+    'profiles: single-point traces through this cursor';
+}
+
+/* ---- metadata panel --------------------------------------------- */
+function showMetadata(datName, decoded, total) {
+  const h = S.head;
+  // v2: the parsed .HIST timing block (if present) is finally displayed.
+  const hist = (S.hist && typeof S.hist === 'object') ? S.hist : {};
+  const rows = [
+    ['File', datName],
+    ['Experiment', h.EXPERIMENT_NAME || '-'],
+    ['Measurement', h.MEASUREMENT_NAME || '-'],
+    ['Timestamp', h.TIMESTAMP || '-'],
+    ['Sample', h.SAMPLE || '-'],
+    ['Photon energy (E_PH)', (h.E_PH || '-') + ' eV'],
+    ['Pass energy (EPASS)', h.EPASS || '-'],
+    ['Slit / Contrast / Field', (h.SLIT_EA1_VALUE || '-') + ' / ' + (h.CONTRAST_APERTURE || '-') + ' / ' + (h.FIELD_APERTURE || '-')],
+    ['Axis', (h.AXIS_NAME || '-') + '  ' + (h.AXIS_START || '?') + ' \u2192 ' + (h.AXIS_STOP || '?') + ' step ' + (h.AXIS_STEP || '?')],
+    ['Axis points (AXIS_N)', h.AXIS_N || '-'],
+    ['Dwell / Slice (us)', h.DWELL_TIME || '-'],
+    ['HIST timing', 'T_STEP ' + (hist.T_STEP || '-') + '  T_OFFSET ' + (hist.T_OFFSET || '-') + '  EXP_TIME ' + (hist.EXP_TIME || '-')],
+    ['Binning / ROI', (h.BINNING || '-') + '  ' + (h.ROI_LEFT || '?') + ',' + (h.ROI_TOP || '?') + ' - ' + (h.ROI_RIGHT || '?') + ',' + (h.ROI_BOTTOM || '?')],
+    ['Energy to time', 'T_STEP ' + (h.DLD_T_STEP || '-') + ', T_OFFSET ' + (h.DLD_T_OFFSET || '-')],
+    ['Slices decoded', decoded + ' / ' + total + (lastFailedFiles.length ? '  (' + lastFailedFiles.length + ' failed - see console)' : '')],
+    ['Cube shape', S.nE + ' (E) \u00d7 ' + S.ny + ' \u00d7 ' + S.nx],
+    ['Viewer version', APP_VERSION],
+    ['Development notes', 'Created by generative AI at the direction of the maintainer; see the file header'],
+  ];
+  $('metaBox').textContent = rows.map(r => r[0].padEnd(22) + ': ' + r[1]).join('\n');
+}
+
+async function handleFileList(files) {
+  try {
+
+    status('');
+    $('loadOverlay').style.display = 'flex';
+    setProgress(0, 'Scanning files\u2026');
+
+    const list = Array.from(files);
+    const byName = new Map();
+    for (const f of list) byName.set(f.name.toUpperCase(), f);
+
+    // locate the main .DAT
+    let datFile = list.find(f => /\.dat$/i.test(f.name) && /dld_his_tr/i.test(f.name));
+    if (!datFile) datFile = list.find(f => /\.dat$/i.test(f.name));
+    if (!datFile) { throw new Error('No .DAT file found in the selected folder.'); }
+
+    setProgress(0.05, 'Reading ' + datFile.name + '\u2026');
+    const datText = await datFile.text();
+    const parsed = parseDAT(datText);
+    const head = parsed.head;
+    let scan = parsed.scan;
+
+    if (scan.length === 0) throw new Error('No [SCAN] table with TIF references found in ' + datFile.name);
+
+    // sort by energy only if energies look sane
+    let haveE = scan.every(s => Number.isFinite(s.energy));
+    if (haveE) scan.sort((a, b) => a.energy - b.energy);
+
+    // collect the TIF names, then locate them case-insensitively in the folder
+    const wanted = scan.map(s => s.tif);
+    const found = wanted.map(w => {
+      let f = byName.get(w.toUpperCase());
+      if (f) return f;
+      // try basename-only match (files may be at a different folder depth)
+      const base = w.split(/[\\/]/).pop().toUpperCase();
+      f = byName.get(base);
+      return f || null;
+    });
+    let nFound = found.filter(Boolean).length;
+
+    // Fall back to a plain .TIF scan when the DAT references cannot be matched:
+    // either the DAT had no scan table, or none of the referenced names exist
+    // in the folder the user picked (files renamed / moved / partial selection).
+    if (nFound === 0) {
+      const tifs = list.filter(f => /\.tiff?$/i.test(f.name))
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+      if (tifs.length === 0) throw new Error('No .TIF slices found (neither in the .DAT scan table nor as files).');
+      found.length = 0;
+      scan = tifs.map((f, i) => ({ energy: i, tif: f.name }));
+      for (const f of tifs) found.push(f);
+      nFound = tifs.length;
+      haveE = false;              // v2: index energies must never be labelled "eV"
+      // energies will fall back to AXIS_START + i*AXIS_STEP below (or index)
+    } else {
+      // Drop rows whose TIF could not be located so the cube stays contiguous.
+      const keepScan = [], keepFound = [];
+      for (let i = 0; i < found.length; i++) {
+        if (found[i]) { keepScan.push(scan[i]); keepFound.push(found[i]); }
+      }
+      if (keepFound.length !== found.length) {
+        console.warn('Skipping', found.length - keepFound.length, 'scan row(s) whose .TIF was not found.');
+      }
+      scan = keepScan; found.length = 0;
+      for (const f of keepFound) found.push(f);
+    }
+    // energies in the scan table are only trustworthy if they came from the DAT
+    haveE = haveE && nFound === scan.length && scan.length > 0;
+
+    // histogram metadata (.HIST) - optional, informational only
+    const histFile = list.find(f => /\.hist$/i.test(f.name));
+    if (histFile) { try { S.hist = parseHIST(await histFile.text()); } catch (e) {} }
+
+    // ---- decode the TIF slices ----
+    const total = found.length;
+    const slices = new Array(total).fill(null);
+    let decoded = 0, w = 0, h = 0;
+    // v2: record per-file failures so they surface in the UI (and the toast).
+    lastFailedFiles = [];
+    for (let k = 0; k < total; k++) {
+      const file = found[k];
+      setProgress(0.08 + 0.82 * (k / Math.max(1, total)),
+        'Decoding slice ' + (k + 1) + ' / ' + total + (file ? ' \u2013 ' + file.name : ' \u2013 (missing)'));
+      if (!file) { lastFailedFiles.push('(missing)'); continue; }
+      let img = null;
+      try {
+        const buf = await file.arrayBuffer();
+        img = decodeTIFF(buf);
+      } catch (e) {
+        console.warn('Failed to decode', file.name, e);
+        lastFailedFiles.push(file.name + (e && e.message ? ' (' + e.message + ')' : ''));
+        img = null;
+      }
+      if (img) {
+        if (!w) { w = img.width; h = img.height; }
+        if (img.width !== w || img.height !== h) {
+          lastFailedFiles.push(file.name + ' (size differs from cube)');   // v2: report, don't skip silently
+        } else {
+          slices[k] = img.data;
+          decoded++;
+        }
+      }
+      if (k % 8 === 7) await new Promise(r => setTimeout(r, 0));
+    }
+    if (!decoded || !w) throw new Error('No TIF slice could be decoded.' +
+      (lastFailedFiles.length ? ' Last error: ' + lastFailedFiles[lastFailedFiles.length - 1] : ''));
+
+    // ---- assemble the 3D cube ----
+    setProgress(0.92, 'Assembling 3D cube\u2026');
+    const nE = total, ny = h, nx = w;
+    // v2 production: refuse absurd cubes rather than freeze/crash the tab.
+    // 4-byte Float32 x nE*ny*nx. Model-size 81*512*512 is ~85 MB (fine);
+    // warn above ~1.5 GB, hard-refuse above ~3 GB.
+    const approxBytes = 4 * nE * ny * nx;
+    if (approxBytes > 3.2e9) {
+      throw new Error('Dataset rejected: the cube needs ~' + (approxBytes / 1e9).toFixed(1) +
+        ' GB RAM (limit 3 GB). Load fewer .TIF slices or a smaller ROI.');
+    } else if (approxBytes > 1.5e9) {
+      if (!confirm('This dataset is ~' + (approxBytes / 1e9).toFixed(1) +
+        ' GB in memory. Continue?')) throw new Error('Load cancelled (large dataset).');
+    }
+    const cube = new Float32Array(nE * ny * nx);
+    // (v2: the dead gmax scan is gone - vmax was removed from the state)
+    for (let e = 0; e < nE; e++) {
+      const src = slices[e];
+      if (!src) continue;
+      const base = e * ny * nx;
+      for (let i = 0; i < ny * nx; i++) cube[base + i] = src[i];
+      slices[e] = null;   // v2: let the decoded slice be GC'd as we go
+      if (e % 16 === 15) await new Promise(r => setTimeout(r, 0));
+    }
+
+    // energies
+    // v2: energyIsIndex records whether this axis is a real ramp (eV) or a
+    // synthesized 0..N-1 slice counter, so the UI stops labelling indices
+    // with the "eV" unit.
+    let energies;
+    const st = Number(head.AXIS_START);
+    const sp = Number(head.AXIS_STEP);
+    let energyIsIndex = false;
+    if (haveE) {
+      energies = scan.map(s => s.energy);
+    } else if (parsed.axisEnergies.length === nE) {
+      energies = parsed.axisEnergies.slice();
+    } else if (Number.isFinite(st) && Number.isFinite(sp)) {
+      energies = Array.from({ length: nE }, (_, i) => st + i * sp);
+    } else {
+      energies = Array.from({ length: nE }, (_, i) => i);
+      energyIsIndex = true;
+    }
+    // If TIF-only mode, synthesize an index axis
+    if (!energies.some(v => Number.isFinite(v))) energies = Array.from({ length: nE }, (_, i) => i);
+
+    // v2: commit all new state in one assignment so a throw anywhere above
+    // leaves any previously loaded dataset intact (v1 mutated S
+    // incrementally and could strand a half-loaded state).
+    stopPlay();
+    Object.assign(S, {
+      cube, nE, ny, nx,
+      energies, head,
+      energyIsIndex,
+      hasData: true,
+      zmin: null, zmax: null,
+      cursorI: Math.floor(nx / 2), cursorJ: Math.floor(ny / 2),
+      phys: { E: null, kx: null, ky: null },
+      avgX: 0, avgY: 0, avgWidth: { E: 0, kx: 0, ky: 0 },
+      calibPoint: null,
+      cut: 'E'
+    });
+afterLoad3d((typeof datFile!=='undefined'&&datFile&&datFile.name?datFile.name:'dataset'), (typeof decoded!=='undefined'?decoded:null), (typeof total!=='undefined'?total:null));
+} catch (err) {
+    console.error(err);
+    $('loadOverlay').style.display = 'none';
+    status('Error: ' + err.message);
+    toast('Could not load data: ' + err.message, 7000);
+  }
+}
+
+/* ---- built-in demo dataset -------------------------------------- */
+async function loadDemoData() {
+  try {
+
+    $('loadOverlay').style.display = 'flex';
+    setProgress(0.1, 'Generating demo data\u2026');
+    const nE = 81, nx = 256, ny = 256;
+    const E_start = 13.3, E_step = 0.1;
+    const E_PH = 21.21875, W_ANA = 4.75;
+    const kTotal = 0.5123 * Math.sqrt(Math.max(0.01, E_PH - W_ANA));
+    const halfCone = Math.PI / 2;
+    const cx = (nx - 1) / 2, cy = (ny - 1) / 2;
+    const hx = (nx - 1) / 2, hy = (ny - 1) / 2;
+    function kOfPixel(delta, half) {
+      const frac = Math.max(-1, Math.min(1, delta / half));
+      const theta = Math.asin(Math.max(-1, Math.min(1, frac * Math.sin(halfCone))));
+      return kTotal * Math.sin(theta);
+    }
+    const energies = new Array(nE);
+    for (let i = 0; i < nE; i++) energies[i] = E_start + i * E_step;
+    const cube = new Float32Array(nE * ny * nx);
+    let seed = 1234567;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    const gauss = () => (rnd() + rnd() + rnd() + rnd() + rnd() + rnd() - 3) * 1.4;
+    setProgress(0.3, 'Generating demo data\u2026');
+    for (let e = 0; e < nE; e++) {
+      const ph = energies[e];
+      const eBind = 0.40 - 0.055 * (ph - E_start);
+      const kF_ss = 0.080 + 0.055 * Math.max(0, eBind);
+      const bandK = 0.55 * (ph - 17.0);
+      const baseOff = e * ny * nx;
+      for (let j = 0; j < ny; j++) {
+        const ky = kOfPixel(j - cy, hy);
+        for (let i = 0; i < nx; i++) {
+          const kx = kOfPixel(i - cx, hx);
+          const kr = Math.sqrt(kx * kx + ky * ky);
+          let s = 0;
+          if (kF_ss > 0.002) { const dr = (kr - kF_ss) / 0.018; s += 620 * Math.exp(-dr * dr); }
+          const db = (kx - bandK) / 0.16;
+          s += 380 * Math.exp(-db * db) * Math.exp(-(ky * ky) / (2 * 0.9 * 0.9));
+          s += 45 * Math.exp(-(kr * kr) / (2 * 1.2 * 1.2));
+          const rr = Math.min(1, kr / (kTotal * 1.02));
+          s += 30 * Math.exp(-rr * rr * 2.0);
+          s += 12;
+          cube[baseOff + j * nx + i] = Math.max(0, s * (1 + 0.06 * gauss()));
+        }
+      }
+      // v2: yield to the event loop so the overlay spinner actually animates
+      if (e % 8 === 7) { setProgress(0.3 + 0.6 * (e / nE), 'Generating demo data\u2026'); await new Promise(r => setTimeout(r, 0)); }
+    }
+    setProgress(0.95, 'Assembling demo cube\u2026');
+    const head = {
+      FILE_ID: 'PRONANOESCA EXPDAT 4 (DEMO)', EXPERIMENT_NAME: 'DEMO',
+      MEASUREMENT_NAME: 'DEMO_Ag111_surface_state', SAMPLE: 'Ag(111)  [synthetic demo]',
+      TIMESTAMP: new Date().toLocaleString(),
+      E_PH: String(E_PH), E_PH_COMMENT: 'He I', W_ANA: String(W_ANA), EPASS: '50.000000',
+      AXIS_NAME: 'E-EF', AXIS_START: String(E_start),
+      AXIS_STOP: String(E_start + (nE - 1) * E_step), AXIS_STEP: String(E_step), AXIS_N: String(nE),
+      M_FOV: '19063.829787', M_P: '35.795178', DWELL_TIME: '100000', BINNING: '4',
+      ROI_LEFT: '1', ROI_TOP: '1', ROI_RIGHT: String(nx), ROI_BOTTOM: String(ny),
+      DLD_T_STEP: '0.05208320', DLD_T_OFFSET: '32.994707',
+    };
+    // v2: the dead gmax scan is gone (vmax was removed from the state).
+    // v2: single commit; drops v1's dead vmin/vmax/sumHalf fields.
+    stopPlay();
+    Object.assign(S, {
+      cube, nE, ny, nx,
+      energies, head, hist: {},
+      energyIsIndex: false,
+      hasData: true,
+      zmin: null, zmax: null,
+      cursorI: Math.floor(nx * 0.5), cursorJ: Math.floor(ny * 0.5)
+    });
+afterLoad3d('(built-in demo)', null, null);
+} catch (err) {
+    console.error(err);
+    $('loadOverlay').style.display = 'none';
+    status('Demo error: ' + err.message);
+  }
+}
+
+/* ---- k-space calibration UI ------------------------------------- */
+let calibArmed=false;
+
+function updateKInfo() {
+  const h = S.head || {};
+  const Ep = Number(h.E_PH), W = Number(h.W_ANA);
+  const ekin = isFinite(Ep) ? (Ep - (isFinite(W) ? W : 0)) : NaN;
+  const lines = [];
+  lines.push('k_total   = ' + (K.kTotal > 0 ? K.kTotal.toFixed(4) : 'n/a') + '  (0.5123\u00B7\u221A(E_kin))');
+  lines.push('E_ph      = ' + (isFinite(Ep) ? Ep.toFixed(3) : '-') + ' eV' +
+             (isFinite(ekin) ? '   E_kin = ' + ekin.toFixed(3) + ' eV' : ''));
+  lines.push('\u03B8_max     = ' + (K.thetaMax * 180 / Math.PI).toFixed(2) + '\u00B0  (per edge)');
+  // v2: v1 printed "M_FOV = 0.0" whenever M_FOV was absent (it is unused
+  // by the model since the full-cone change); the line now states which
+  // source k_max came from.
+  lines.push('k_max     = ' + (K.kMax > 0 ? K.kMax.toFixed(4) : '-') + ' \u00C5\u207B\u00B9  ' +
+             (K.manualKMax > 0 ? '(manual)' : '(model, kScale = ' + K.kScale.toFixed(3) + ')'));
+  lines.push('k/pixel   = ' + (K.kMax > 0 && S.nx ? (2 * K.kMax / S.nx).toExponential(3) : '-') + ' \u00C5\u207B\u00B9');
+  lines.push('mapping   = ' + (K.rmap === 'radius' ? 'k linear in radius' : 'k = k\u209C\u00B7sin(\u03B8)'));
+  $('kInfo').textContent = lines.join('\n');
+}
+
+function toggleCalibration() {
+  // v2: the pick happens in the kx x ky map, so refuse to arm inside a cut
+  // view instead of silently ignoring the click later.
+  if (!calibArmed && S.hasData && isCutMode()) {
+    toast('Calibration needs the E = const map \u2014 switch the Mode back to E.');
+    return;
+  }
+  calibArmed = !calibArmed;
+  $('kCalibBox').style.display = calibArmed ? 'block' : 'none';
+  const btn = $('kCalibBtn');
+  if (calibArmed) {
+    btn.style.outline = '2px solid #d62728';
+    $('kCalibHint').textContent = 'Now CLICK the known feature on the map. kScale will be solved so that point lands on |k| = ' +
+      ($('kKnownInput').value || '0.08') + ' \u00C5\u207B\u00B9.';
+    heatC.style.cursor = 'crosshair';
+  } else {
+    btn.style.outline = '';
+    $('kCalibHint').textContent = 'Press the button, then click a known feature on the map (e.g. the Ag(111) surface state at ~0.08 \u00C5\u207B\u00B9). kScale will be solved so that point lands on the value above.';
+    heatC.style.cursor = '';
+  }
+}
+
+function calibrateFromPixel(i, j, targetK) {
+  const nx = S.nx, ny = S.ny;
+  if (!nx || !ny) return null;
+  const cx = K.cx * (nx - 1), cy = K.cy * (ny - 1);
+  const hx = (nx - 1) / 2, hy = (ny - 1) / 2;
+  const dx = hx > 0 ? (i - cx) / hx : 0;
+  const dy = hy > 0 ? (j - cy) / hy : 0;
+  const frac = Math.hypot(dx, dy);      // fractional radius (1 = edge midpoint)
+  if (!(frac > 1e-6) || !(K.kTotal > 0)) return { ok: false, msg: 'click further from the centre (and check E_PH / W_ANA)' };
+
+  if (K.rmap === 'radius') {
+    // v2: exact solve. With the linear-radius map the clicked point sits at
+    // k = frac * k_max, so the required k_max is simply target / frac. We
+    // store it as the MANUAL k_max override instead of rescaling kScale
+    // through the cone model (which did not land on the target).
+    return { ok: true, manualKMax: targetK / frac };
+  }
+
+  // angle map: sin(theta) = frac * sin(theta_max),  k = k_total * sin(theta)
+  const sinTheta = targetK / K.kTotal;
+  if (sinTheta > 1) return { ok: false, msg: 'target |k| exceeds k_total = ' + K.kTotal.toFixed(3) + ' \u00C5\u207B\u00B9' };
+  const sinThetaMax = sinTheta / frac;
+  if (sinThetaMax > 1) return { ok: false, msg: 'feature is too far from centre for this |k| (would need a cone > 90\u00B0)' };
+  const thetaMaxNew = Math.asin(sinThetaMax);      // radians
+  const thetaMaxCur = K.thetaMax;                  // radians (already includes kScale)
+  if (!(thetaMaxCur > 0)) return { ok: false, msg: 'theta_max unavailable' };
+  return { ok: true, kScale: K.kScale * (thetaMaxNew / thetaMaxCur) };
+}
+
+function applyCalibration() {
+  if (!calibArmed) { toggleCalibration(); return; }
+  if (!calibPick) {
+    $('kCalibHint').textContent = 'Click the known feature on the map first, then press Apply (adjust |k| and press Apply again to re-solve).';
+    return;
+  }
+  finishCalibration(calibPick.i, calibPick.j);
+}
+
+function finishCalibration(i, j) {
+  const target = parseFloat($('kKnownInput').value);
+  if (!isFinite(target) || target <= 0) {
+    $('kCalibHint').textContent = 'Enter a positive known |k| first.';
+    return;
+  }
+  const res = calibrateFromPixel(i, j, target);
+  if (!res.ok) {
+    $('kCalibHint').textContent = '\u26A0 ' + res.msg + '  (the pick is kept \u2014 adjust |k| and press Apply)';
+    return;
+  }
+  if (res.manualKMax !== undefined) {
+    // radius map: exact k_max override
+    K.manualKMax = res.manualKMax;
+    $('kMaxInput').value = K.manualKMax.toFixed(4);
+  } else {
+    // angle map: cone-angle solve via kScale; v2 reports clamping instead
+    // of silently applying a clamped value as if it were exact.
+    const want = res.kScale, cl = Math.max(0.02, Math.min(1.5, want));
+    if (Math.abs(cl - want) > 1e-9) {
+      $('kCalibHint').textContent = '\u26A0 the solve wants kScale = ' + want.toFixed(3) +
+        ', outside the slider range [0.02, 1.5] \u2014 clamped to ' + cl.toFixed(3) +
+        '. Use the k_max field for extreme cones.';
+    }
+    K.kScale = cl;
+    $('kScale').value = cl.toFixed(2);
+  }
+  S.calibPoint = { i, j };
+  computeKCalibration();
+  updateKInfo();
+  savePrefs();   // v2.1: a completed calibration must survive reloads
+  drawMini(); drawMiniOverlay(); drawProfiles3d(); updateCursorInfo3d();
+  try { requestRender(); } catch(_){}
+  const kedge = isFinite(K.kMax) ? K.kMax.toFixed(4) : '-';
+  const coneDeg = (K.thetaMax * 180 / Math.PI).toFixed(1);
+  $('kCalibHint').textContent = '\u2714 calibrated: kScale = ' + K.kScale.toFixed(3) +
+    ' \u2192 cone \u00B1' + coneDeg + '\u00B0, k_max = ' + kedge + ' \u00C5\u207B\u00B9 at the edge. ' +
+    'If the cone angle looks wrong, the picked point or |k| may need adjusting.';
+  toggleCalibration();   // disarm
+}
+
+/* ---- updateK: driver for the k-space panel ---------------------- */
+function updateK(){
+  try { computeKCalibration(); } catch(e){}
+  try { updateKInfo(); } catch(e){}
+  const defK = (typeof K!=='undefined') ? K : {};
+  const sc = $('kScaleVal'); if (sc) sc.textContent = (typeof defK.kScale==='number' ? defK.kScale : 1).toFixed(2);
+  requestRender();
+}
+
+/* ---- colormap ids ----------------------------------------------- */
+const CMAP_IDS = { im: 'inferno', vi: 'viridis', pl: 'plasma', gs: 'grayscale', dv: 'diverging', rainbow: 'rainbow' };
+function markActiveCmap() {
+  const sel = $('cmapSelect');
+  if (!sel) return;
+  const want = Object.keys(CMAP_IDS).find(k => CMAP_IDS[k] === S.cmap) || '';
+  if (want && Array.from(sel.options).some(o => o.value === want)) sel.value = want;
+}
+
+/* ---- colormap / invert / theme ---------------------------------- */
+function _normCmap(v){
+  if (v==null) return 'inferno';
+  if (CMAPS[v]) return v;
+  if (typeof CMAP_IDS!=='undefined' && CMAP_IDS){
+    for (const k in CMAP_IDS){ if (CMAP_IDS[k]===v) return k; }
+    if (CMAP_IDS[v]) return CMAP_IDS[v];
+  }
+  return 'inferno';
+}
+function changeColormap(v){
+  S.cmap=_normCmap(v);
+  try { if (typeof savePrefs==='function') savePrefs(); } catch(_){}
+  if (typeof markActiveCmap==='function') markActiveCmap();
+  if (V3.gl) lutUpload();
+  const sl=miniSlice(); if (sl){ const r=currentZRangeFor(sl); drawColorbar(r[0], r[1]); }
+  drawMini(); drawMiniOverlay(); drawProfiles3d(); requestRender();
+}
+function toggleInvert(){
+  S.invert=!S.invert;
+  const cb=$('invertCheckbox'); if (cb) cb.checked=!!S.invert;
+  try { if (typeof savePrefs==='function') savePrefs(); } catch(_){}
+  if (V3.gl) lutUpload();
+  const sl=miniSlice(); if (sl){ const r=currentZRangeFor(sl); drawColorbar(r[0], r[1]); }
+  drawMini(); drawMiniOverlay(); drawProfiles3d(); requestRender();
+}
+function toggleTheme(){
+  document.body.classList.toggle('dark-mode');
+  const b=$('themeBtn'); if (b) b.textContent = document.body.classList.contains('dark-mode') ? '\u2600' : '\u{1F319}';
+  try { if (typeof savePrefs==='function') savePrefs(); } catch(_){}
+  const sl=miniSlice(); if (sl){ const r=currentZRangeFor(sl); drawColorbar(r[0], r[1]); }
+  drawMini(); drawMiniOverlay(); drawProfiles3d(); requestRender();
+}
+
+/* ---- chart helpers (colorbar, ticks, z-range) ------------------- */
+function cbGeometry(){
+  const dpr = window.devicePixelRatio || 1;
+  const W = cbC.clientWidth || 320, H = cbC.clientHeight || 42;
+  const padL = 4, padR = 4, barY = 6, barH = Math.max(8, H - 30);
+  return { dpr, W, H, padL, padR, barY, barH, barW: Math.max(1, W - padL - padR) };
+}
+let cbHandlePos = { minX: 0, maxX: 0 };
+function cbRange(){
+  // outer scale = full data extent (fallback to the display range)
+  let dmin = S.dataMin, dmax = S.dataMax;
+  if (dmin==null || dmax==null || !(dmax>dmin)){
+    dmin = (S.zmin!=null)?S.zmin:0; dmax = (S.zmax!=null)?S.zmax:1;
+    if (!(dmax>dmin)) dmax = dmin + 1;
+  }
+  let lo = (S.zmin!=null)?S.zmin:dmin, hi = (S.zmax!=null)?S.zmax:dmax;
+  if (!(hi>lo)) hi = lo + 1e-9;
+  return { dmin, dmax, lo, hi };
+}
+function drawColorbar(zmin, zmax) {
+  const g = cbGeometry();
+  const dpr = g.dpr, W = g.W, H = g.H;
+  if (cbC.width !== Math.round(W*dpr) || cbC.height !== Math.round(H*dpr)){
+    cbC.width = Math.round(W*dpr); cbC.height = Math.round(H*dpr);
+  }
+  const c = cbC.getContext('2d');
+  c.setTransform(dpr,0,0,dpr,0,0);
+  const cmap = CMAPS[S.cmap] || CMAPS.inferno;
+  // background
+  const bg = getComputedStyle(document.body).getPropertyValue('--canvas-bg').trim() || '#fff';
+  c.fillStyle = bg; c.fillRect(0,0,W,H);
+  // gradient spans the FULL data range
+  const { dmin, dmax, lo, hi } = cbRange();
+  const range = Math.max(1e-12, dmax - dmin);
+  for (let x=0; x<g.barW; x++){
+    const t = x/(g.barW-1);
+    const tt = S.invert ? 1-t : t;
+    const rgb = cmap(tt);
+    c.fillStyle = 'rgba('+(rgb[0]|0)+','+(rgb[1]|0)+','+(rgb[2]|0)+',1)';
+    c.fillRect(g.padL+x, g.barY, 1, g.barH);
+  }
+  // dim the out-of-window regions so the selected span stands out
+  const minPx = g.padL + Math.max(0, Math.min(1, (lo - dmin)/range)) * g.barW;
+  const maxPx = g.padL + Math.max(0, Math.min(1, (hi - dmin)/range)) * g.barW;
+  cbHandlePos = { minX: minPx, maxX: maxPx };
+  c.save();
+  c.fillStyle = 'rgba(0,0,0,0.55)';
+  if (minPx > g.padL) c.fillRect(g.padL, g.barY, minPx - g.padL, g.barH);
+  if (maxPx < g.padL + g.barW) c.fillRect(maxPx, g.barY, (g.padL + g.barW) - maxPx, g.barH);
+  c.restore();
+  // border
+  c.strokeStyle = getComputedStyle(document.body).getPropertyValue('--border-color').trim() || '#dee2e6';
+  c.lineWidth = 1; c.strokeRect(g.padL+0.5, g.barY+0.5, g.barW-1, g.barH-1);
+  // handles
+  const colMin = '#009944', colMax = '#cc1166';
+  const drawHandle = (px, col) => {
+    c.strokeStyle = col; c.fillStyle = col; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(px, g.barY-2); c.lineTo(px, g.barY+g.barH+2); c.stroke();
+    c.beginPath(); c.moveTo(px-5, g.barY-2); c.lineTo(px+5, g.barY-2); c.lineTo(px, g.barY-7); c.closePath(); c.fill();
+    c.beginPath(); c.moveTo(px-5, g.barY+g.barH+2); c.lineTo(px+5, g.barY+g.barH+2); c.lineTo(px, g.barY+g.barH+7); c.closePath(); c.fill();
+  };
+  drawHandle(minPx, colMin);
+  drawHandle(maxPx, colMax);
+  // labels (min left, max right) below the bar
+  c.font = '11px ui-monospace, monospace'; c.textBaseline = 'bottom';
+  c.textAlign = 'left';  c.fillStyle = colMin;
+  c.fillText('min ' + fmtNum(lo), 2, H-1);
+  c.textAlign = 'right'; c.fillStyle = colMax;
+  c.fillText('max ' + fmtNum(hi), W-2, H-1);
+  // keep the legacy text labels in sync (if present)
+  const lo_el = $('cbLo'), hi_el = $('cbHi');
+  if (lo_el) lo_el.textContent = fmtNum(lo);
+  if (hi_el) hi_el.textContent = fmtNum(hi);
+}
+
+
+/* ---- colorbar handle dragging: pick the min/max of the displayed range ---- */
+let cbDrag = null;
+let cbPending = false;
+function cbPointerMx(clientX){
+  const r = cbC.getBoundingClientRect();
+  const g = cbGeometry();
+  // map client X into the bar's internal (CSS px) coordinate space
+  return (clientX - r.left) * (g.W / Math.max(1, r.width));
+}
+function cbApplyDrag(mx){
+  const g = cbGeometry();
+  const frac = Math.max(0, Math.min(1, (mx - g.padL) / g.barW));
+  const { dmin, dmax } = cbRange();
+  const val = dmin + frac * (dmax - dmin);
+  const span = Math.max(1e-12, dmax - dmin);
+  let lo = (S.zmin!=null)?S.zmin:dmin, hi = (S.zmax!=null)?S.zmax:dmax;
+  if (cbDrag === 'min') lo = Math.min(val, hi - span*0.002);
+  else                  hi = Math.max(val, lo + span*0.002);
+  lo = Math.max(dmin, Math.min(dmax, lo));
+  hi = Math.max(dmin, Math.min(dmax, hi));
+  S.zmin = lo; S.zmax = hi;
+  const zi = $('zminInput'), zx = $('zmaxInput');
+  if (zi) zi.value = fmtNum(lo);
+  if (zx) zx.value = fmtNum(hi);
+  cbScheduleApply();
+}
+function cbScheduleApply(){
+  if (cbPending) return;
+  cbPending = true;
+  requestAnimationFrame(() => {
+    cbPending = false;
+    // No re-upload needed: the shader applies the window via uWin.
+    drawColorbar(S.zmin, S.zmax);
+    drawMini(); drawProfiles3d(); requestRender();
+  });
+}
+function cbStartDrag(mx){
+  if (Math.abs(mx - cbHandlePos.minX) < 14) cbDrag = 'min';
+  else if (Math.abs(mx - cbHandlePos.maxX) < 14) cbDrag = 'max';
+  else cbDrag = (Math.abs(mx - cbHandlePos.minX) < Math.abs(mx - cbHandlePos.maxX)) ? 'min' : 'max';
+}
+function cbInstallHandlers(){
+  if (!cbC) return;
+  cbC.style.touchAction = 'none';
+  cbC.addEventListener('pointerdown', e => {
+    if (!S.hasData) return;
+    cbStartDrag(cbPointerMx(e.clientX));
+    try { cbC.setPointerCapture(e.pointerId); } catch(_){}
+    e.preventDefault();
+  });
+  cbC.addEventListener('pointermove', e => {
+    if (!cbDrag) return;
+    cbApplyDrag(cbPointerMx(e.clientX));
+  });
+  ['pointerup','pointercancel','lostpointercapture'].forEach(t =>
+    cbC.addEventListener(t, e => { if (!cbDrag) return; cbDrag = null; try { cbC.releasePointerCapture(e.pointerId); } catch(_){} }));
+  cbC.addEventListener('dblclick', () => {
+    if (!S.hasData) return;
+    const { dmin, dmax } = cbRange();
+    S.zmin = dmin; S.zmax = dmax;
+    const zi = $('zminInput'), zx = $('zmaxInput');
+    if (zi) zi.value = fmtNum(dmin); if (zx) zx.value = fmtNum(dmax);
+    cbScheduleApply();
+  });
+}
+
+function niceTicks(min, max, count) {
+  if (!isFinite(min) || !isFinite(max)) return [];
+  const range = max - min;
+  if (!(range > 0)) return [min];
+  const rough = range / count;
+  if (!(rough > 0)) return [min, max];
+  const exp = Math.floor(Math.log10(rough));
+  const pow10 = Math.pow(10, exp);
+  let frac = rough / pow10;
+  if (!isFinite(frac) || frac < 1 || frac > 10) frac = 5;
+  const nf = frac < 1.5 ? 1 : (frac < 3 ? 2 : (frac < 7 ? 5 : 10));
+  let step = nf * pow10;
+  const minStep = Math.abs(max - min) * 1e-12;
+  if (!(step > 0) || step < minStep) step = minStep;
+  const out = [];
+  const start = Math.ceil(min / step) * step;
+  for (let v = start, k = 0; v <= max + step * 0.5 && k < 200; v += step, k++) {
+    // snap tiny FP noise
+    const r = Math.round(v / step) * step;
+    out.push(r);
+  }
+  return out;
+}
+
+function computeZRange(slice, ignoreManual) {
+  // v2: merged with the verbatim duplicate computeZRangeNoCache (which
+  // cached nothing). ignoreManual=true recomputes even when a manual
+  // z-range is active (used by Autoscale).
+  if (!ignoreManual && S.zmin !== null && S.zmax !== null) return [S.zmin, S.zmax];
+  let mn = Infinity, mx = -Infinity;
+  for (let i = 0; i < slice.length; i++) { const v = slice[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+  if (!isFinite(mn)) { mn = 0; mx = 1; }
+  if (mx <= mn) mx = mn + 1;
+  // robust upper end: ~99.5th percentile via sampling
+  const N = slice.length;
+  const step = Math.max(1, Math.floor(N / 60000));
+  const sample = [];
+  for (let i = 0; i < N; i += step) sample.push(slice[i]);
+  sample.sort((a, b) => a - b);
+  const p995 = sample[Math.min(sample.length - 1, Math.floor(sample.length * 0.995))];
+  return [mn, Math.max(p995, mn + 1e-9)];
+}
+
+function fmtNum(v) {
+  if (!isFinite(v)) return '0';
+  const a = Math.abs(v);
+  if (a !== 0 && (a < 0.01 || a >= 1e6)) return v.toExponential(3);
+  return (Math.round(v * 1000) / 1000).toString();
+}
+
+/* ---- slabs (E / kx / ky clip planes) ---------------------------- */
+const SLABS = { E:{pos:'ePosX', w:'eW', row:'slabE', n:()=>S.nE, kind:'E'},
+                kx:{pos:'kxPos', w:'kxW', row:'slabKx', n:()=>S.nx, kind:'kx'},
+                ky:{pos:'kyPos', w:'kyW', row:'slabKy', n:()=>S.ny, kind:'ky'} };
+function slabVal(kind, idx){
+  if (kind==='E') return energyAt(idx);
+  const n = kind==='kx' ? S.nx : S.ny;
+  return (K && K.enabled && K.kMax>0) ? pixelToK(idx, n, kind==='kx'?'x':'y') : idx;
+}
+function slabLabel(kind, idx){
+  if (kind==='E') return fmtNum(slabVal('E',idx)) + ' ' + energyUnit();
+  return (K && K.enabled && K.kMax>0) ? formatKAxis(slabVal(kind,idx)) + ' \u00C5\u207B\u00B9' : String(Math.round(idx));
+}
+function setSlab(kind, pos){
+  const s = SLABS[kind], n = s.n(); if (!n) return;
+  pos = Math.max(0, Math.min(n-1, Math.round(pos)));
+  S.slabPos[kind] = pos; $(s.pos).value = pos;
+  const w = S.slabW[kind] = Math.max(0, Math.min((n-1)>>1, (S.slabW[kind]|0)));
+  const denom = Math.max(1, n-1);
+  let f0 = (pos - w) / denom, f1 = (pos + w) / denom;
+  const wmax = (n-1)>>1;
+  if (w >= wmax){ f0 = 0; f1 = 1; }   // 'Full' = the entire axis, exactly
+  else {
+    // A zero-width 'plane' would give f0 == f1 -> the shader's ray-box test yields an
+    // empty interval and the volume vanishes. Give it a minimum thickness so the cut
+    // plane is always visible.
+    const MINTH = 0.5 / denom;
+    if (f1 - f0 < MINTH){ const mid = (f0 + f1) / 2; f0 = mid - MINTH/2; f1 = mid + MINTH/2; }
+  }
+  const ax = kind==='E' ? 'z' : (kind==='kx' ? 'x' : 'y');
+  V3.slabs[ax] = [Math.max(0,f0), Math.min(1,f1)];
+  if (kind==='E'){ const hs=$('sliceSlider'); hs.max=Math.max(0,n-1); hs.value=pos; }
+  $(s.row).querySelector('.slabVal').textContent = slabLabel(kind, pos);
+  $(s.w).textContent = w ? ('\u00b1'+w) : 'plane';
+  requestRender();
+  // Keep the shared cursor unified with the slab positions: moving the kx/ky
+  // sliders also moves the cursor point used by the profiles.
+  if (kind==='kx'){ S.cursorI = pos; }
+  else if (kind==='ky'){ S.cursorJ = pos; }
+  else if (kind==='E'){ S.cursorE = pos; }
+  if (kind==='E'){ drawMini(); drawMiniOverlay(); }
+  drawProfiles3d(); updateCursorInfo3d();
+  status(slabLabel('E', S.slabPos.E));
+}
+function stepSlabW(kind, d){
+  const s = SLABS[kind], n = s.n(); if (!n) return;
+  S.slabW[kind] = Math.max(0, Math.min((n-1)>>1, (S.slabW[kind]|0) + d));
+  setSlab(kind, S.slabPos[kind]);
+}
+function wireslabs(){
+  for (const k of ['E','kx','ky']){
+    const s = SLABS[k];
+    $(s.pos).addEventListener('input', e => setSlab(k, +e.target.value));
+    $(s.row).querySelector('.wMinus').onclick = () => stepSlabW(k,-1);
+    $(s.row).querySelector('.wPlus').onclick  = () => stepSlabW(k, 1);
+    $(s.row).querySelector('.fullBtn').onclick = () => { S.slabW[k]=(SLABS[k].n()-1)>>1; setSlab(k,S.slabPos[k]); };
+    $(s.row).querySelector('.planeBtn').onclick= () => { S.slabW[k]=0; setSlab(k,S.slabPos[k]); };
+  }
+}
+function wireProfileButtons(){
+  const on=(id,fn)=>{ const el=$(id); if (el) el.addEventListener('click', fn); };
+  on('avgHMinus', ()=>stepSlabW('ky',-1)); on('avgHPlus', ()=>stepSlabW('ky',+1));
+  on('avgVMinus', ()=>stepSlabW('kx',-1)); on('avgVPlus', ()=>stepSlabW('kx',+1));
+}
+
+/* ---- minimap (E = const map) ------------------------------------ */
+function miniRect(cv){
+  let r = cv.getBoundingClientRect();
+  if (r.width > 4 && r.height > 4) return { width: r.width, height: r.height };
+  const p = cv.parentElement;
+  if (p){
+    const pr = p.getBoundingClientRect();
+    if (pr.width > 4 && pr.height > 4) return { width: pr.width, height: pr.height };
+    if (p.clientWidth > 4 && p.clientHeight > 4) return { width: p.clientWidth, height: p.clientHeight };
+  }
+  if (cv.clientWidth > 4 && cv.clientHeight > 4) return { width: cv.clientWidth, height: cv.clientHeight };
+  return { width: 256, height: 256 };
+}
+function miniSlice(){
+  if (!S.hasData || !S.viewCube) return null;
+  const cube = S.viewCube;
+  const {nE, ny, nx} = S;
+  // The minimap is a kx x ky map AT the cursor energy. It samples the single
+  // energy plane (S.cursorE) - independent of the 3D E-slab clip width.
+  const e = (S.cursorE!=null && S.cursorE>=0) ? (S.cursorE|0) : (S.slabPos.E|0);
+  const pos = Math.max(0, Math.min(nE-1, e));
+  const out = new Float32Array(ny*nx);
+  const b = pos*ny*nx;
+  for (let i=0;i<ny*nx;i++) out[i] = cube[b+i];
+  return {data:out, w:nx, h:ny};
+}
+function currentZRangeFor(sl){ return computeZRange(sl.data, false); }
+function drawMini(){
+  if (!S.hasData || !S.viewCube || !hctx){ if (hctx) hctx.clearRect(0,0,heatC.width,heatC.height); $('miniInfo').textContent='-'; return; }
+  const sl = miniSlice(); if (!sl) return;
+  const zr = currentZRangeFor(sl); const zmin=zr[0], zmax=zr[1];
+  const dpr=window.devicePixelRatio||1, r=miniRect(heatC);
+  const w=Math.max(2,(r.width*dpr)|0), h=Math.max(2,(r.height*dpr)|0);
+  if (heatC.width!==w||heatC.height!==h){ heatC.width=w; heatC.height=h; }
+  const img = hctx.createImageData(sl.w, sl.h);
+  const cmap = CMAPS[S.cmap] || CMAPS.inferno || CMAPS.im; const inv=S.invert; const scale=1/Math.max(1e-12, zmax-zmin);
+  const lut = new Uint8Array(1024*3);
+  const gam = (S.gamma!=null)?S.gamma:1.0;
+  for (let i=0;i<1024;i++){ let t=Math.pow(i/1023, gam); if(inv) t=1-t; const c=cmap(t); lut[i*3]=c[0]|0; lut[i*3+1]=c[1]|0; lut[i*3+2]=c[2]|0; }
+  const d=img.data;
+  for (let i=0;i<sl.w*sl.h;i++){ let t=(sl.data[i]-zmin)*scale; t=t<0?0:(t>1?1:t); const li=(t*1023)|0, o=i*4;
+    d[o]=lut[li*3]; d[o+1]=lut[li*3+1]; d[o+2]=lut[li*3+2]; d[o+3]=255; }
+  const off=document.createElement('canvas'); off.width=sl.w; off.height=sl.h;
+  off.getContext('2d').putImageData(img, 0, 0);
+  hctx.setTransform(1,0,0,1,0,0);
+  hctx.clearRect(0,0,w,h);
+  hctx.imageSmoothingEnabled = true;
+  hctx.drawImage(off, 0, 0, sl.w, sl.h, 0, 0, w, h);
+  $('miniInfo').textContent = slabLabel('E', (S.cursorE!=null && S.cursorE>=0) ? (S.cursorE|0) : (S.slabPos.E|0));
+}
+function drawMiniOverlay(){
+  const dpr=window.devicePixelRatio||1, r=miniRect(overC);
+  const w=Math.max(2,(r.width*dpr)|0), h=Math.max(2,(r.height*dpr)|0);
+  if (overC.width!==w||overC.height!==h){ overC.width=w; overC.height=h; }
+  octx.setTransform(dpr,0,0,dpr,0,0); octx.clearRect(0,0,r.width,r.height);
+  if (!S.hasData) return;
+  const sx = r.width/Math.max(1,S.nx), sy = r.height/Math.max(1,S.ny);
+  octx.lineWidth=1; octx.strokeStyle=getComputedStyle(document.body).getPropertyValue('--status-color').trim()||'#d62728';
+  if (S.cursorI!=null && S.cursorI>=0){ octx.beginPath();
+    octx.moveTo(S.cursorI*sx+0.5,0); octx.lineTo(S.cursorI*sx+0.5,r.height);
+    octx.moveTo(0,S.cursorJ*sy+0.5); octx.lineTo(r.width,S.cursorJ*sy+0.5); octx.stroke(); }
+  if (S.calibPoint){ octx.fillStyle='#2ca02c'; octx.beginPath();
+    octx.arc(S.calibPoint.i*sx+2, S.calibPoint.j*sy+2, 4, 0, Math.PI*2); octx.fill(); }
+  const armed = (typeof calibArmed!=='undefined') && calibArmed;
+  if (armed){ octx.setLineDash([4,3]); octx.strokeStyle='#d62728';
+    octx.strokeRect(1,1,r.width-2,r.height-2); octx.setLineDash([]); }
+}
+/* --- shared cursor setter: one place updates everything --- */
+/* Shared 3D cursor: S.cursorI (kx), S.cursorJ (ky), S.slabPos.E (E).
+   Any view that moves the cursor calls a setter here, and every dependent
+   view (minimap, all 3 profiles, cursor readout, 3D crosshair) is refreshed. */
+function refreshCursorViews(){
+  drawMiniOverlay();
+  drawProfiles3d();
+  updateCursorInfo3d();
+  if (typeof requestRender === 'function') requestRender();
+}
+/* If an axis is set to 'Plane' (zero width), its 3D cut follows the cursor. */
+function followPlane(axis){
+  if (!V3 || !V3.slabs) return;
+  const n  = axis==='E' ? (S.nE|0) : (axis==='kx' ? (S.nx|0) : (S.ny|0));
+  if (!n) return;
+  const w  = S.slabW[axis]|0;
+  if (w !== 0) return;                       // only Plane mode follows
+  const pos = axis==='E' ? ((S.cursorE!=null&&S.cursorE>=0)?(S.cursorE|0):(S.slabPos.E|0))
+                         : (axis==='kx' ? (S.cursorI|0) : (S.cursorJ|0));
+  const p = Math.max(0, Math.min(n-1, pos));
+  const denom = Math.max(1, n-1);
+  const MINTH = 0.5/denom;
+  let f0 = p/denom - MINTH/2, f1 = p/denom + MINTH/2;
+  const ax = axis==='E' ? 'z' : (axis==='kx' ? 'x' : 'y');
+  V3.slabs[ax] = [Math.max(0,f0), Math.min(1,f1)];
+  S.slabPos[axis] = p;                        // keep the slider label in sync
+  const row = SLABS[axis] && $(SLABS[axis].pos);
+  if (row) row.value = p;
+  const rowEl = SLABS[axis] && $(SLABS[axis].row);
+  if (rowEl){ const v = rowEl.querySelector('.slabVal'); if (v) v.textContent = slabLabel(axis, p); }
+}
+function setCursor(i, j){
+  if (!S.hasData) return;
+  const nx=S.nx|0, ny=S.ny|0;
+  if (nx>0) i = Math.max(0, Math.min(nx-1, Math.round(i)));
+  if (ny>0) j = Math.max(0, Math.min(ny-1, Math.round(j)));
+  S.cursorI=i; S.cursorJ=j;
+  followPlane('kx');
+  followPlane('ky');
+  refreshCursorViews();
+}
+function setCursorE(k){
+  // Moves the shared ENERGY cursor (the E-profile drag).
+  // Updates the E=const minimap slice, all three profiles, the cursor readout
+  // and the 3D crosshair. It does NOT move the E clip plane or the E slider.
+  if (!S.hasData) return;
+  const nE=S.nE|0; if (!nE) return;
+  S.cursorE = Math.max(0, Math.min(nE-1, Math.round(k)));
+  followPlane('E');
+  drawMini();            // the minimap is a kx-ky slice at the cursor energy
+  refreshCursorViews();
+}
+function miniFromEvent(e){
+  const r = heatC.getBoundingClientRect();
+  const i = (e.clientX-r.left)/Math.max(1,r.width) * S.nx;
+  const j = (e.clientY-r.top) /Math.max(1,r.height)* S.ny;
+  return [i, j];
+}
+let miniDrag = false;
+heatC.addEventListener('pointerdown', e => {
+  if (!S.hasData) return;
+  const armed = (typeof calibArmed!=='undefined') && calibArmed;
+  const [i,j] = miniFromEvent(e);
+  if (armed){
+    try { finishCalibration(Math.max(0,Math.min(S.nx-1,Math.floor(i))), Math.max(0,Math.min(S.ny-1,Math.floor(j)))); } catch(_){}
+    return;
+  }
+  miniDrag = true;
+  try { heatC.setPointerCapture(e.pointerId); } catch(_){}
+  setCursor(i, j);
+  e.preventDefault();
+});
+heatC.addEventListener('pointermove', e => {
+  if (!miniDrag || !S.hasData) return;
+  const armed = (typeof calibArmed!=='undefined') && calibArmed;
+  if (armed) return;
+  const [i,j] = miniFromEvent(e);
+  setCursor(i, j);
+});
+['pointerup','pointercancel','lostpointercapture'].forEach(t => heatC.addEventListener(t, e => {
+  if (!miniDrag) return;
+  miniDrag = false;
+  try { heatC.releasePointerCapture(e.pointerId); } catch(_){}
+}));
+heatC.style.touchAction = 'none';
+
+/* ---- profiles (single-point traces through the cursor) ---------- */
+function profileSeries(kind){
+  if (!S.hasData || !S.viewCube) return null;
+  const cube = S.viewCube;
+  const {nE,ny,nx} = S;
+  const i = Math.max(0, Math.min(nx-1, (S.cursorI==null||S.cursorI<0)? (nx>>1) : (S.cursorI|0)));
+  const j = Math.max(0, Math.min(ny-1, (S.cursorJ==null||S.cursorJ<0)? (ny>>1) : (S.cursorJ|0)));
+  const eC = Math.max(0, Math.min(nE-1, (S.cursorE!=null && S.cursorE>=0) ? (S.cursorE|0) : ((S.slabPos && S.slabPos.E!=null)? (S.slabPos.E|0) : (nE>>1))));
+  // Single-point traces through the 3D cursor: no averaging bands.
+  if (kind==='E'){
+    const out = new Float32Array(nE);
+    for (let e=0;e<nE;e++){ out[e] = cube[e*ny*nx + j*nx + i]; }
+    return {vals:out, n:nE, axis:'E', cursorIdx:eC};
+  }
+  if (kind==='kx'){
+    const out = new Float32Array(nx);
+    const b = eC*ny*nx + j*nx;
+    for (let x=0;x<nx;x++){ out[x] = cube[b + x]; }
+    return {vals:out, n:nx, axis:'kx', cursorIdx:i};
+  }
+  const out = new Float32Array(ny);
+  for (let y=0;y<ny;y++){ out[y] = cube[eC*ny*nx + y*nx + i]; }
+  return {vals:out, n:ny, axis:'ky', cursorIdx:j};
+}
+function drawProfile3d(cv, series, kind){
+  const dpr=devicePixelRatio||1, W=cv.clientWidth||300, H=cv.clientHeight||110;
+  if (cv.width!==((W*dpr)|0)){ cv.width=(W*dpr)|0; cv.height=(H*dpr)|0; }
+  const c=cv.getContext('2d'); c.setTransform(dpr,0,0,dpr,0,0); c.clearRect(0,0,W,H);
+  const css=getComputedStyle(document.body);
+  c.fillStyle=css.getPropertyValue('--canvas-bg').trim()||'#fff'; c.fillRect(0,0,W,H);
+  if (!series){ c.fillStyle=css.getPropertyValue('--axis-color').trim()||'#333'; c.font='12px system-ui'; c.textAlign='center';
+    c.fillText('no data', W/2, H/2); return; }
+  let mn=Infinity,mx=-Infinity;
+  for (let i=0;i<series.n;i++){ const v=series.vals[i]; if(v<mn)mn=v; if(v>mx)mx=v; }
+  if (!(mx>mn)) mx=mn+1;
+  const pad={l:44,r:8,t:8,b:18};
+  const x2px = i => pad.l + (i/((series.n-1)||1))*(W-pad.l-pad.r);
+  const v2px = v => H-pad.b - ((v-mn)/(mx-mn))*(H-pad.t-pad.b);
+  c.strokeStyle=css.getPropertyValue('--grid-color').trim()||'#e0e0e0'; c.lineWidth=1;
+  c.fillStyle=css.getPropertyValue('--axis-color').trim()||'#333'; c.font='10px ui-monospace,monospace';
+  for (const tv of niceTicks(mn,mx,4)){ const py=v2px(tv); if (py<pad.t||py>H-pad.b) continue;
+    c.beginPath(); c.moveTo(pad.l,py); c.lineTo(W-pad.r,py); c.stroke(); c.textAlign='right'; c.fillText(fmtNum(tv), pad.l-4, py+3); }
+  for (const t of [0,0.25,0.5,0.75,1]){ const idx=Math.round(t*(series.n-1)); const px=x2px(idx);
+    c.textAlign='center'; c.fillText(slabLabel(kind,idx), Math.min(px, W-pad.l-6), H-4); }
+  c.strokeStyle=css.getPropertyValue('--profile-line').trim()||'#000'; c.lineWidth=1.5; c.beginPath();
+  for (let i=0;i<series.n;i++){ const px=x2px(i), py=v2px(series.vals[i]); i?c.lineTo(px,py):c.moveTo(px,py); }
+  c.stroke();
+  const mark = (series.cursorIdx!=null) ? series.cursorIdx
+             : (kind==='E' ? ((S.cursorE!=null&&S.cursorE>=0)?(S.cursorE|0):(S.slabPos.E|0)) : (kind==='kx'? (S.cursorI|0) : (S.cursorJ|0)));
+  if (mark>=0 && mark<series.n){ const px=x2px(mark);
+    c.strokeStyle='#d62728'; c.lineWidth=1; c.beginPath(); c.moveTo(px,pad.t); c.lineTo(px,H-pad.b); c.stroke();
+    c.fillStyle='#d62728'; c.beginPath(); c.arc(px, v2px(series.vals[mark]), 3, 0, Math.PI*2); c.fill(); }
+}
+function drawProfiles3d(){
+  drawProfile3d($('eProfileCanvas'), S.hasData?profileSeries('E'):null, 'E');
+  drawProfile3d($('hProfileCanvas'), S.hasData?profileSeries('kx'):null, 'kx');
+  drawProfile3d($('vProfileCanvas'), S.hasData?profileSeries('ky'):null, 'ky');
+}
+
+/* --- profile scrubbing: drag a profile to set the corresponding cursor axis --- */
+const PROFILE_PAD = { l: 44, r: 8, t: 8, b: 18 };
+function profileIndexFromEvent(cv, n, e){
+  const r = cv.getBoundingClientRect();
+  const W = r.width;
+  const x = e.clientX - r.left;
+  const span = Math.max(1, W - PROFILE_PAD.l - PROFILE_PAD.r);
+  const frac = (x - PROFILE_PAD.l) / span;
+  const idx = frac * Math.max(0, n-1);
+  return Math.max(0, Math.min(n-1, Math.round(idx)));
+}
+function wireProfileScrub(cvId, kind){
+  const cv = $(cvId); if (!cv) return;
+  cv.style.touchAction = 'none';
+  let dragging = false;
+  const apply = e => {
+    if (!S.hasData) return;
+    const n = kind==='E' ? (S.nE|0) : (kind==='kx' ? (S.nx|0) : (S.ny|0));
+    if (!n) return;
+    const idx = profileIndexFromEvent(cv, n, e);
+    if (kind==='E'){ setCursorE(idx); }                 // moves the shared E cursor
+    else if (kind==='kx'){ setCursor(idx, S.cursorJ); } // moves kx only
+    else { setCursor(S.cursorI, idx); }                 // moves ky only
+  };
+  cv.addEventListener('pointerdown', e => {
+    if (!S.hasData) return;
+    dragging = true;
+    try { cv.setPointerCapture(e.pointerId); } catch(_){}
+    apply(e); e.preventDefault();
+  });
+  cv.addEventListener('pointermove', e => { if (dragging) apply(e); });
+  ['pointerup','pointercancel','lostpointercapture'].forEach(t => cv.addEventListener(t, e => {
+    if (!dragging) return;
+    dragging = false;
+    try { cv.releasePointerCapture(e.pointerId); } catch(_){}
+  }));
+}
+function wireAllProfileScrub(){
+  // All three profiles drive the SAME shared 3D cursor point.
+  wireProfileScrub('eProfileCanvas','E');   // moves the energy cursor
+  wireProfileScrub('hProfileCanvas','kx');  // moves the kx cursor
+  wireProfileScrub('vProfileCanvas','ky');  // moves the ky cursor
+}
+
+/* ---- 3D engine (WebGL2 ray marching: DVR / iso / MIP) ----------- */
+const V3GL_VS = `#version 300 es
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0;
+  gl_Position = vec4(p, 0.0, 1.0);
+}`;
+const V3GL_FS = `#version 300 es
+precision highp float;
+precision highp sampler3D;
+uniform sampler3D uVol;
+uniform sampler2D uLut;
+uniform vec3  uEye;
+uniform mat3  uCam;
+uniform vec2  uFov;
+uniform vec2  uRes;
+uniform vec2  uSlab;
+uniform vec2  uSlab1;
+uniform vec2  uSlabZ;
+uniform vec3  uVolSize;
+uniform float uIso;
+uniform int   uMode;
+uniform int   uSteps;
+uniform float uGain;
+uniform vec2  uWin;      // display window in quantised units: (lo, hi)
+out vec4 outColor;
+vec2 slabBox(vec3 ro, vec3 rd){
+  // widen any degenerate axis slightly so a zero-thickness slider position still
+  // produces a visible cut instead of a fully empty ray interval
+  vec2 sx = uSlab,  sx1 = uSlab1;
+  vec2 sz = uSlabZ;
+  const float MINW = 0.0008;
+  if (sx1.x - sx.x < MINW){ float m=(sx.x+sx1.x)*0.5; sx.x=m-MINW*0.5; sx1.x=m+MINW*0.5; }
+  if (sx1.y - sx.y < MINW){ float m=(sx.y+sx1.y)*0.5; sx.y=m-MINW*0.5; sx1.y=m+MINW*0.5; }
+  if (sz.y - sz.x < MINW){ float m=(sz.x+sz.y)*0.5; sz.x=m-MINW*0.5; sz.y=m+MINW*0.5; }
+  vec3 bmin = vec3(sx.x, sx.y, sz.x);
+  vec3 bmax = vec3(sx1.x, sx1.y, sz.y);
+  vec3 inv = 1.0 / rd;
+  vec3 t0 = (bmin - ro) * inv, t1 = (bmax - ro) * inv;
+  vec3 tm = min(t0, t1), tM = max(t0, t1);
+  return vec2(max(max(max(tm.x, tm.y), tm.z), 0.0), min(min(tM.x, tM.y), tM.z));
+}
+float sampleV(vec3 p){
+  float q = texture(uVol, p).r;             // 0..1 over the full data extent
+  float w = (q - uWin.x) / max(1e-6, (uWin.y - uWin.x));
+  return clamp(w, 0.0, 1.0);
+}
+void main(){
+  vec2 uv = (gl_FragCoord.xy / uRes) * 2.0 - 1.0;
+  vec3 rd = normalize(uCam * vec3(uv * uFov, 1.0));
+  vec2 hit = slabBox(uEye, rd);
+  outColor = vec4(0.0);
+  if (hit.y <= hit.x) return;
+  if (uMode == 2){
+    float m = 0.0; float dt = (hit.y-hit.x)/float(uSteps);
+    for (int i=0;i<512;i++){ if (i>=uSteps) break;
+      m = max(m, sampleV(uEye + rd*(hit.x + (float(i)+0.5)*dt))); }
+    outColor = vec4(texture(uLut, vec2(m, 0.5)).rgb, 1.0); return;
+  }
+  if (uMode == 1){
+    float dt = (hit.y-hit.x)/float(uSteps);
+    float tPrev = hit.x; float vPrev = sampleV(uEye + rd*hit.x);
+    for (int i=1;i<=512;i++){ if (i>uSteps) break;
+      float t = hit.x + float(i)*dt; float v = sampleV(uEye + rd*t);
+      if (vPrev < uIso && v >= uIso){
+        float f = (uIso - vPrev) / max(v - vPrev, 1e-6);
+        vec3 p = uEye + rd*(tPrev + f*dt);
+        vec3 g = vec3(
+          sampleV(p+vec3(1.0/uVolSize.x,0.0,0.0)) - sampleV(p-vec3(1.0/uVolSize.x,0.0,0.0)),
+          sampleV(p+vec3(0.0,1.0/uVolSize.y,0.0)) - sampleV(p-vec3(0.0,1.0/uVolSize.y,0.0)),
+          sampleV(p+vec3(0.0,0.0,1.0/uVolSize.z)) - sampleV(p-vec3(0.0,0.0,1.0/uVolSize.z)));
+        vec3 n = -normalize(g + vec3(1e-6));
+        float lam = max(dot(n, normalize(vec3(0.5,0.8,0.6))), 0.0);
+        vec3 c = mix(texture(uLut, vec2(uIso,0.5)).rgb, vec3(1.0), 0.35) * (0.25 + 0.75*lam);
+        outColor = vec4(c, 1.0); return;
+      }
+      tPrev = t; vPrev = v; }
+    return;
+  }
+  vec4 acc = vec4(0.0); float dt = (hit.y-hit.x)/float(uSteps);
+  for (int i=0;i<512;i++){ if (i>=uSteps) break;
+    float v = sampleV(uEye + rd*(hit.x + (float(i)+0.5)*dt));
+    if (v <= 0.003) continue;
+    vec3 c = texture(uLut, vec2(v, 0.5)).rgb;
+    float a = 1.0 - exp(-v * uGain * dt * 8.0);
+    acc.rgb += (1.0 - acc.a) * a * c;
+    acc.a   += (1.0 - acc.a) * a;
+    if (acc.a > 0.98) break; }
+  outColor = acc;
+}`;
+const V3 = { gl:null, prog:null, uni:{}, tex:null, lutTex:null,
+  volW:0, volH:0, volD:0, volSize:[1,1,1],
+  yaw:0.9, pitch:0.35, dist:2.6, target:[0.5,0.5,0.5],
+  mode:0, isoT:0.55, gain:3.0, steps:256,
+  slabs:{ x:[0,1], y:[0,1], z:[0,1] },
+  needsUpload:true, quant:null, qlo:0, qhi:1 };
+function glInit(canvas){
+  const gl = canvas.getContext('webgl2', {antialias:false, preserveDrawingBuffer:true, powerPreference:'high-performance'});
+  if (!gl){ const f=document.getElementById('glFallback'); if (f) f.style.display='block';
+    toast('WebGL2 unavailable \u2014 the 3D view is disabled; the side panel still works.'); return false; }
+  try {
+    const mk=(t,s)=>{ const sh=gl.createShader(t); gl.shaderSource(sh,s); gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error((gl.getShaderInfoLog(sh)||'compile').slice(0,180)); return sh; };
+    const prog=gl.createProgram();
+    gl.attachShader(prog, mk(gl.VERTEX_SHADER, V3GL_VS));
+    gl.attachShader(prog, mk(gl.FRAGMENT_SHADER, V3GL_FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error((gl.getProgramInfoLog(prog)||'link').slice(0,180));
+    V3.gl=gl; V3.prog=prog;
+    for (const n of ['uVol','uLut','uEye','uCam','uFov','uRes','uSlab','uSlab1','uSlabZ','uVolSize','uIso','uMode','uSteps','uGain','uWin'])
+      V3.uni[n]=gl.getUniformLocation(prog, n);
+    return true;
+  } catch(e){
+    V3.gl=null; const f=document.getElementById('glFallback'); if (f) f.style.display='block';
+    toast('3D engine init failed: ' + (e.message||e)); return false;
+  }
+}
+function glUploadVolume(){
+  const gl = V3.gl; if (!gl || !S.hasData || !S.viewCube) return;
+  const cube = S.viewCube;
+  const {nE, ny, nx} = S, N = cube.length;
+  if (!nE || !ny || !nx || nE*ny*nx !== N){ console.warn('cube shape mismatch', nE, ny, nx, N); return; }
+  // Quantise ONCE over the fixed data extent; the display window (S.zmin/zmax)
+  // is applied in the shader via uWlo/uWhi so dragging the colorbar handles is instant.
+  const step = Math.max(1, (N/2.2e6)|0);
+  const samp=[]; let mn=Infinity, mx=-Infinity;
+  for (let i=0;i<N;i+=step){ const v=cube[i]; samp.push(v); if (v<mn) mn=v; if (v>mx) mx=v; }
+  samp.sort((a,b)=>a-b);
+  const p995 = samp[Math.min(samp.length-1, (samp.length*0.995)|0)];
+  let lo = (S.dataMin != null) ? S.dataMin : mn;
+  let hi = (S.dataMax != null) ? S.dataMax : Math.max(p995, mn + 1e-9);
+  if (!(hi>lo)) hi = lo + 1e-9;
+  V3.qlo=lo; V3.qhi=hi;
+  if (!V3.quant || V3.quant.length !== N) V3.quant = new Uint8Array(N);
+  const q = V3.quant, sc = 255/Math.max(1e-9, hi-lo);
+  for (let i=0;i<N;i++){ let t=(cube[i]-lo)*sc; q[i] = t<0?0:(t>255?255:t); }
+  if (!V3.tex) V3.tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_3D, V3.tex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, nx, ny, nE, 0, gl.RED, gl.UNSIGNED_BYTE, q);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  V3.volW=nx; V3.volH=ny; V3.volD=nE; V3.volSize=[nx, ny, nE];
+  V3.needsUpload = false;
+}
+function lutUpload(){
+  const gl = V3.gl; if (!gl) return;
+  const cmap = CMAPS[S.cmap] || CMAPS.inferno || CMAPS.im;
+  const px = new Uint8Array(256*4);
+  const gam = (S.gamma!=null)?S.gamma:1.0;
+  for (let i=0;i<256;i++){ let t=i/255; t = Math.pow(t, gam); if (S.invert) t = 1-t; const c = cmap(t);
+    px[i*4]=c[0]; px[i*4+1]=c[1]; px[i*4+2]=c[2]; px[i*4+3]=255; }
+  if (!V3.lutTex) V3.lutTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, V3.lutTex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+function camVectors(){
+  const cy=Math.cos(V3.yaw), sy=Math.sin(V3.yaw), cp=Math.cos(V3.pitch), sp=Math.sin(V3.pitch);
+  const eye=[ V3.target[0]+V3.dist*cp*cy, V3.target[1]+V3.dist*sp, V3.target[2]+V3.dist*cp*sy ];
+  const fwd=[ (V3.target[0]-eye[0])/V3.dist, (V3.target[1]-eye[1])/V3.dist, (V3.target[2]-eye[2])/V3.dist ];
+  const right=[ -sy, 0, cy ];
+  const up=[ -sp*cy, cp, -sp*sy ];
+  return { eye, fwd, right, up };
+}
+function glRender(){
+  const gl = V3.gl; if (!gl) return;
+  if (S.hasData && V3.needsUpload) glUploadVolume();
+  const W = gl3d.clientWidth|0, H = gl3d.clientHeight|0;
+  if (W < 2 || H < 2) return;
+  const dpr = window.devicePixelRatio || 1;
+  const pw = Math.max(2, W*dpr|0), ph = Math.max(2, H*dpr|0);
+  if (gl3d.width !== pw || gl3d.height !== ph){ gl3d.width = pw; gl3d.height = ph; }
+  gl.viewport(0, 0, pw, ph);
+  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+  if (!S.hasData || !V3.tex || !V3.prog || !V3.lutTex) return;
+  const {eye, fwd, right, up} = camVectors();
+  const fovx = Math.tan(35*Math.PI/180), fovy = fovx*(ph/pw);
+  const U = V3.uni, sl = V3.slabs;
+  gl.useProgram(V3.prog);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, V3.tex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, V3.lutTex);
+  gl.uniform1i(U.uVol, 0); gl.uniform1i(U.uLut, 1);
+  gl.uniform3fv(U.uEye, eye);
+  gl.uniformMatrix3fv(U.uCam, false, new Float32Array([right[0],right[1],right[2], up[0],up[1],up[2], fwd[0],fwd[1],fwd[2]]));
+  gl.uniform2fv(U.uFov, [fovx, fovy]);
+  gl.uniform2fv(U.uRes, [pw, ph]);
+  gl.uniform2fv(U.uSlab,  [sl.x[0], sl.y[0]]);
+  gl.uniform2fv(U.uSlab1, [sl.x[1], sl.y[1]]);
+  gl.uniform2fv(U.uSlabZ, [sl.z[0], sl.z[1]]);
+  gl.uniform3fv(U.uVolSize, V3.volSize);
+  gl.uniform1f(U.uIso, V3.isoT); gl.uniform1i(U.uMode, V3.mode);
+  gl.uniform1i(U.uSteps, V3.steps); gl.uniform1f(U.uGain, V3.gain);
+  // map the quantised 0..1 back to the selected window's 0..1
+  const qlo = V3.qlo, qhi = V3.qhi;
+  const wlo = (S.zmin!=null)?S.zmin:qlo, whi = (S.zmax!=null)?S.zmax:qhi;
+  const span = Math.max(1e-12, (whi-wlo));
+  const toQ = (v) => (v - qlo) / Math.max(1e-12, (qhi - qlo));
+  gl.uniform2f(U.uWin, toQ(wlo), toQ(whi));
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+function proj3(p){
+  const {eye, fwd, right, up} = camVectors();
+  const d=[p[0]-eye[0], p[1]-eye[1], p[2]-eye[2]];
+  const x=d[0]*right[0]+d[1]*right[1]+d[2]*right[2];
+  const y=d[0]*up[0]+d[1]*up[1]+d[2]*up[2];
+  const z=d[0]*fwd[0]+d[1]*fwd[1]+d[2]*fwd[2];
+  if (z <= 1e-4) return null;
+  const W=gl3d.clientWidth, H=gl3d.clientHeight;
+  const fovx=Math.tan(35*Math.PI/180), fovy=fovx*(H/Math.max(1,W));
+  return [ W/2 + (x/z)/fovx*(W/2), H/2 - (y/z)/fovy*(H/2) ];
+}
+function setRenderMode(m){ V3.mode = (m==='iso') ? 1 : (m==='mip') ? 2 : 0; requestRender(); }
+function setIsoT(t){ V3.isoT = Math.max(0.01, Math.min(0.99, +t));
+  const el=$('isoVal'); if (el) el.textContent = Math.round(V3.isoT*100)+'%'; requestRender(); }
+function setGain(g){ V3.gain = Math.max(0.5, Math.min(6, +g));
+  const el=$('gainVal'); if (el) el.textContent = V3.gain.toFixed(1); requestRender(); }
+function setSteps(s){ V3.steps = Math.max(32, Math.min(512, +s|0)); requestRender(); }
+
+/* ---- 2D overlay on the 3D view (box, ticks, crosshair) ---------- */
+function boxEdges(B){
+  const cs=[];
+  for (const ix of [0,1]) for (const iy of [0,1]) for (const iz of [0,1])
+    cs.push([ix?B[1]:B[0], iy?B[3]:B[2], iz?B[5]:B[4]]);
+  const out=[]; for (let a=0;a<8;a++) for (let b=a+1;b<8;b++){ const d=a^b; if (d===1||d===2||d===4) out.push([cs[a],cs[b]]); }
+  return out;
+}
+function drawGLOverlay(){
+  const dpr=devicePixelRatio||1, W=glo.clientWidth||10, H=glo.clientHeight||10;
+  if (W<4||H<4) return;
+  if (glo.width!==((W*dpr)|0)){ glo.width=(W*dpr)|0; glo.height=(H*dpr)|0; }
+  const c=glo.getContext('2d'); c.setTransform(dpr,0,0,dpr,0,0); c.clearRect(0,0,W,H);
+  if (!S.hasData) return;
+  const css=getComputedStyle(document.body);
+  const B=[V3.slabs.x[0],V3.slabs.x[1],V3.slabs.y[0],V3.slabs.y[1],V3.slabs.z[0],V3.slabs.z[1]];
+  c.globalAlpha=0.30; c.strokeStyle=css.getPropertyValue('--grid-color').trim()||'#ccc'; c.lineWidth=1;
+  for (const [p,q] of boxEdges([0,1,0,1,0,1])){ const P=proj3(p),Q=proj3(q); if(!P||!Q) continue;
+    c.beginPath(); c.moveTo(P[0],P[1]); c.lineTo(Q[0],Q[1]); c.stroke(); }
+  c.globalAlpha=1.0; c.strokeStyle=css.getPropertyValue('--axis-color').trim()||'#333';
+  for (const [p,q] of boxEdges(B)){ const P=proj3(p),Q=proj3(q); if(!P||!Q) continue;
+    c.beginPath(); c.moveTo(P[0],P[1]); c.lineTo(Q[0],Q[1]); c.stroke(); }
+  draw3dTicks(c, css, B);
+  if (S.cursorI!=null && S.cursorI>=0 && S.cursorJ!=null && S.cursorJ>=0 && S.nE){
+    const ePos = (S.cursorE!=null && S.cursorE>=0) ? (S.cursorE|0) : (S.slabPos.E|0);
+    const p=[Math.min(Math.max(S.cursorI/Math.max(1,S.nx-1),B[0]),B[1]),
+             Math.min(Math.max(S.cursorJ/Math.max(1,S.ny-1),B[2]),B[3]),
+             Math.min(Math.max(ePos/Math.max(1,S.nE-1),B[4]),B[5])];
+    const P=proj3(p);
+    if (P){ c.strokeStyle='#d62728'; c.lineWidth=1.5;
+      c.beginPath(); c.arc(P[0],P[1],5,0,Math.PI*2); c.stroke();
+      c.beginPath(); c.moveTo(P[0]-9,P[1]); c.lineTo(P[0]+9,P[1]);
+      c.moveTo(P[0],P[1]-9); c.lineTo(P[0],P[1]+9); c.stroke(); }
+  }
+}
+function draw3dTicks(c, css, B){
+  const cw=glo.clientWidth, ch=glo.clientHeight;
+  const col=css.getPropertyValue('--axis-color').trim()||'#333';
+  c.fillStyle=col; c.strokeStyle=col; c.font='11px ui-monospace,monospace'; c.lineWidth=1;
+  const axisDefs = [ ['E', 2], ['kx', 0], ['ky', 1] ];
+  for (const [name, ai] of axisDefs){
+    const nIdx = name==='E' ? (S.nE|0) : (name==='kx' ? (S.nx|0) : (S.ny|0));
+    if (!nIdx) continue;
+    let best=null, bestScore=-Infinity;
+    for (const v0 of [0,1]) for (const v1 of [0,1]){
+      const a=[0,0,0], b=[0,0,0];
+      const other=[0,1,2].filter(x=>x!==ai);
+      a[other[0]] = v0 ? B[2*other[0]+1] : B[2*other[0]];
+      a[other[1]] = v1 ? B[2*other[1]+1] : B[2*other[1]];
+      for (let k=0;k<3;k++) b[k]=a[k];
+      a[ai]=B[2*ai]; b[ai]=B[2*ai+1];
+      const P=proj3(a), Q=proj3(b); if(!P||!Q) continue;
+      const mx=(P[0]+Q[0])/2, my=(P[1]+Q[1])/2;
+      const score=Math.hypot(mx-cw/2, my-ch/2);
+      if (score>bestScore){ bestScore=score; best={P,Q,a,b}; }
+    }
+    if (!best) continue;
+    for (const f of [0.27, 0.5, 0.73]){
+      const pt=[ best.a[0]+(best.b[0]-best.a[0])*f, best.a[1]+(best.b[1]-best.a[1])*f, best.a[2]+(best.b[2]-best.a[2])*f ];
+      const PT=proj3(pt); if(!PT) continue;
+      const dxq=best.Q[0]-best.P[0], dyq=best.Q[1]-best.P[1];
+      const elen=Math.hypot(dxq,dyq)||1; const nx=-dyq/elen, ny=dxq/elen;
+      const off = ((PT[0]-cw/2)*nx + (PT[1]-ch/2)*ny) >= 0 ? 1 : -1;
+      c.beginPath(); c.moveTo(PT[0],PT[1]); c.lineTo(PT[0]+nx*6*off, PT[1]+ny*6*off); c.stroke();
+      c.textAlign = (nx*off>=0) ? 'left' : 'right';
+      c.fillText(slabLabel(name, Math.round(f*(nIdx-1))), PT[0]+(nx*off>=0?9:-9), PT[1]+ny*6*off+3);
+    }
+  }
+}
+
+/* ---- PNG export -------------------------------------------------- */
+function savePNG(){
+  const W=gl3d.width, H=gl3d.height;
+  if (!W||!H||!S.hasData){ toast('Nothing to export yet.'); return; }
+  const tmp=document.createElement('canvas'); tmp.width=W; tmp.height=H;
+  const c=tmp.getContext('2d');
+  c.fillStyle=getComputedStyle(document.body).getPropertyValue('--canvas-bg').trim()||'#ffffff';
+  c.fillRect(0,0,W,H);
+  c.drawImage(gl3d,0,0);
+  c.drawImage(glo,0,0);
+  const safe=s=>String(s).replace(/[^\w\-.]+/g,'_').slice(0,60);
+  const base=($('fileInfo').textContent||'nanoesca3d').split(' \u2014 ')[0];
+  const a=document.createElement('a');
+  a.download=safe(base)+'_3d_'+['volume','iso','mip'][V3.mode]+'_'+safe(slabLabel('E',S.slabPos.E))+'.png';
+  a.href=tmp.toDataURL('image/png'); a.click();
+  toast('PNG exported.');
+}
+
+/* ---- Play E (animates the energy plane) ------------------------- */
+let playTimer3d=null;
+function stopPlay(){
+  if (playTimer3d){ clearInterval(playTimer3d); playTimer3d=null; }
+  S.playing=false;
+  const b=$('playBtn'); if (b) b.innerHTML='&#9654; Play E';
+}
+function playEnergy(){
+  if (S.playing){ stopPlay(); return; }
+  if (!S.hasData){ toast('Load data first.'); return; }
+  S.playing=true;
+  const b=$('playBtn'); if (b) b.innerHTML='&#10074;&#10074; Pause';
+  const el=$('sliceSlider');
+  playTimer3d=setInterval(()=>{
+    let v=(+el.value)+1; if (v > +el.max) v=0;
+    setSlab('E', v);
+  }, 200);
+}
+
+/* ---- autoscale / z-range ---------------------------------------- */
+/* ---- contrast controls: gamma + percentile window ------------------- */
+function setGamma(g){
+  const v = Math.max(0.15, Math.min(4.0, +g || 1));
+  S.gamma = v;
+  const el = $('gammaVal'); if (el) el.textContent = v.toFixed(2);
+  if (V3.gl) lutUpload();
+  drawMini(); drawProfiles3d(); requestRender();
+}
+/* Robust window from the data histogram: percentile p (0..100) of the ACTIVE cube. */
+function percentileRange(loPct, hiPct){
+  const c = S.viewCube || S.cube;
+  if (!c){ return null; }
+  const N = c.length, step = Math.max(1, (N/300000)|0);
+  const samp = [];
+  for (let i=0;i<N;i+=step) samp.push(c[i]);
+  if (!samp.length) return null;
+  samp.sort((a,b)=>a-b);
+  const n = samp.length;
+  const lo = samp[Math.max(0, Math.min(n-1, Math.floor((loPct/100)*n)))];
+  const hi = samp[Math.max(0, Math.min(n-1, Math.ceil((hiPct/100)*n)-1))];
+  return (hi>lo) ? [lo, hi] : [lo, lo+1e-9];
+}
+function applyPercentileWindow(loPct, hiPct){
+  if (!S.hasData || !S.viewCube){ toast('Load data first.'); return; }
+  const r = percentileRange(loPct, hiPct);
+  if (!r){ toast('No data to scale.'); return; }
+  S.zmin = r[0]; S.zmax = r[1];
+  const zi=$('zminInput'), zx=$('zmaxInput');
+  if (zi) zi.value = fmtNum(r[0]); if (zx) zx.value = fmtNum(r[1]);
+  drawColorbar(S.zmin, S.zmax); drawMini(); drawProfiles3d(); requestRender();
+}
+function autoscale(){
+  if (!S.hasData || !S.viewCube){ toast('No data to scale.'); return; }
+  const sl = miniSlice(); if (!sl) return;
+  const r = computeZRange(sl.data, true);
+  S.zmin = r[0]; S.zmax = r[1];
+  $('zminInput').value = fmtNum(r[0]); $('zmaxInput').value = fmtNum(r[1]);
+  drawColorbar(r[0], r[1]); drawMini(); drawProfiles3d(); requestRender();
+}
+function updateZRange(){
+  const a=$('zminInput').value.trim(), b=$('zmaxInput').value.trim();
+  let lo = a==='' ? null : parseFloat(a);
+  let hi = b==='' ? null : parseFloat(b);
+  if (!isFinite(lo)) lo=null; if (!isFinite(hi)) hi=null;
+  S.zmin=lo; S.zmax=hi;
+  if (lo!=null && hi!=null) drawColorbar(lo, hi);
+  drawMini(); drawProfiles3d(); requestRender();
+}
+
+/* ---- 3D view interactions (orbit, pan, zoom, keys) -------------- */
+let drag3 = null;
+const ap = new Map(); let pinchD = 0, pinchC = null;
+/* ---- touch/mouse gestures on the 3D view ---------------------------------
+   1 finger = orbit, 2 fingers = pinch-zoom AND two-finger pan,
+   1 finger (right button) = pan, wheel = zoom, double-tap/double-click = reset. */
+function twoFingerState(v){
+  return { d: Math.hypot(v[0][0]-v[1][0], v[0][1]-v[1][1]),
+           cx:(v[0][0]+v[1][0])/2, cy:(v[0][1]+v[1][1])/2 };
+}
+function panBy(dx, dy){
+  const k = V3.dist * 0.0016, {right, up} = camVectors();
+  V3.target[0] -= (right[0]*dx - up[0]*dy) * k;
+  V3.target[1] -= (right[1]*dx - up[1]*dy) * k;
+  V3.target[2] -= (right[2]*dx - up[2]*dy) * k;
+  clampTarget();
+}
+gl3d.addEventListener('pointerdown', e => {
+  ap.set(e.pointerId, [e.clientX, e.clientY]);
+  if (ap.size === 2){
+    const t = twoFingerState([...ap.values()]);
+    pinchD = t.d; pinchC = [t.cx, t.cy]; drag3 = null; return;
+  }
+  if (ap.size > 2) return;
+  drag3 = (e.button === 2) ? {mode:'pan', x:e.clientX, y:e.clientY}
+    : {mode:'orbit', x:e.clientX, y:e.clientY, yaw0:V3.yaw, pitch0:V3.pitch};
+  try { gl3d.setPointerCapture(e.pointerId); } catch(_) {}
+});
+gl3d.addEventListener('pointermove', e => {
+  if (ap.has(e.pointerId)) ap.set(e.pointerId, [e.clientX, e.clientY]);
+  if (ap.size === 2){
+    const v=[...ap.values()], t = twoFingerState(v);
+    if (pinchD > 0 && t.d > 0){
+      // zoom about the finger midpoint
+      V3.dist = Math.max(1.05, Math.min(9, V3.dist * pinchD / t.d));
+    }
+    if (pinchC){ panBy(t.cx - pinchC[0], t.cy - pinchC[1]); }
+    pinchD = t.d; pinchC = [t.cx, t.cy];
+    requestRender(); return;
+  }
+  if (!drag3) return;
+  const dx = e.clientX - drag3.x, dy = e.clientY - drag3.y;
+  if (drag3.mode === 'orbit'){
+    V3.yaw   = drag3.yaw0   + dx * -0.01;
+    V3.pitch = Math.max(-1.45, Math.min(1.45, drag3.pitch0 + dy * -0.008));
+  } else {
+    panBy(dx, dy);
+  }
+  requestRender();
+});
+['pointerup','pointercancel','pointerleave'].forEach(t => gl3d.addEventListener(t, e => {
+  ap.delete(e.pointerId); if (ap.size < 2){ pinchD = 0; pinchC = null; }
+  if (drag3){ drag3 = null; try { gl3d.releasePointerCapture(e.pointerId); } catch(_){} }
+}));
+gl3d.addEventListener('wheel', e => {
+  e.preventDefault();
+  V3.dist = Math.max(1.05, Math.min(9, V3.dist * Math.exp(e.deltaY * 0.0012)));
+  requestRender();
+}, {passive:false});
+gl3d.addEventListener('dblclick', () => reset3dView());
+// double-tap to reset on touch devices (dblclick is unreliable there)
+let lastTap = 0, lastTapX = 0, lastTapY = 0;
+gl3d.addEventListener('pointerup', e => {
+  if (e.pointerType !== 'touch') return;
+  const now = (typeof performance!=='undefined' && performance.now) ? performance.now() : Date.now();
+  const dt = now - lastTap, dx = Math.abs(e.clientX-lastTapX), dy = Math.abs(e.clientY-lastTapY);
+  if (dt < 320 && dx < 28 && dy < 28){ reset3dView(); lastTap = 0; }
+  else { lastTap = now; lastTapX = e.clientX; lastTapY = e.clientY; }
+});
+gl3d.addEventListener('contextmenu', e => e.preventDefault());
+function clampTarget(){ for (let i=0;i<3;i++) V3.target[i]=Math.max(-0.1, Math.min(1.1,V3.target[i])); }
+let renderQueued = false;
+function requestRender(){
+  if (renderQueued) return; renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; glRender(); drawGLOverlay(); });
+}
+function reset3dView(){ V3.yaw=0.9; V3.pitch=0.35; V3.dist=2.6; V3.target=[0.5,0.5,0.5]; requestRender(); }
+window.addEventListener('keydown', e => {
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(tag)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  switch (e.key){
+    case 'ArrowLeft':  setSlab('E',  (+$('ePosX').value)-1); break;
+    case 'ArrowRight': setSlab('E',  (+$('ePosX').value)+1); break;
+    case 'ArrowUp':    setSlab('kx', (+$('kxPos').value)+1); break;
+    case 'ArrowDown':  setSlab('kx', (+$('kxPos').value)-1); break;
+    case ']': setSlab('ky', (+$('kyPos').value)+1); break;
+    case '[': setSlab('ky', (+$('kyPos').value)-1); break;
+    case 'r': case 'R': reset3dView(); break;
+  }
+});
+
+/* ---- init, resize, URL params, public handle --------------------- */
+function resize3d(){ requestRender(); drawMini(); drawMiniOverlay(); drawProfiles3d(); }
+window.addEventListener('resize', resize3d);
+window.addEventListener('orientationchange', () => setTimeout(resize3d, 200));
+function refreshMiniSoon(){
+  drawMini(); drawMiniOverlay();
+  requestAnimationFrame(() => { drawMini(); drawMiniOverlay(); });
+}
+window.addEventListener('load', () => { setTimeout(refreshMiniSoon, 0); setTimeout(refreshMiniSoon, 250); });
+if (typeof ResizeObserver !== 'undefined'){
+  const _ro = new ResizeObserver(() => { drawMini(); drawMiniOverlay(); });
+  try { _ro.observe(document.getElementById('miniWrap')); } catch(_){}
+}
+window.addEventListener('load', () => {
+  const q=location.search||'';
+  if (/[?&]selftest\b/.test(q) || /\bselftest\b/i.test(location.hash||'')){
+    try { const res=selfTest(); const nf=Array.isArray(res)? res.filter(r=>!r.ok).length : 1;
+      toast('Self-test: '+(res.length-nf)+'/'+res.length+(nf?' FAILED \u2014 see console':' passed'), nf?10000:5000);
+      if (!Array.isArray(res) || nf) console.warn('selfTest result', res);
+    } catch(e){ console.error('self-test error:', e); toast('Self-test errored: '+(e.message||e), 8000); }
+    if (V3.gl){ V3.mode=2; glRender(); drawGLOverlay(); }
+  } else {
+    loadDemoData();
+  }
+});
+window.NanoESCAViewer3D = { APP_VERSION, S, K, V3, selfTest, loadDemoData, resetView: reset3dView, toast };
+console.info('NanoESCA 3D Viewer ' + APP_VERSION + ' ready (window.NanoESCAViewer3D)');
+
+/* ---- boot -------------------------------------------------------- */
+applyPrefs(); S.cmap=_normCmap(S.cmap); if (typeof markActiveCmap==='function') markActiveCmap(); drawColorbar(0,1);
+glInit(gl3d);
+wireslabs(); wireProfileButtons(); wireAllProfileScrub(); cbInstallHandlers(); drawMini(); drawMiniOverlay(); drawProfiles3d(); updateCursorInfo3d();
+$('fileInput').addEventListener('change', e=>{ if (e.target.files.length) handleFileList(Array.from(e.target.files)); e.target.value=''; });
+$('dirInput').addEventListener('change', e=>{ if (e.target.files.length) handleFileList(Array.from(e.target.files)); e.target.value=''; });
+document.addEventListener('dragover', e=>e.preventDefault());
+document.addEventListener('drop', e=>{ e.preventDefault(); const fs=e.dataTransfer&&e.dataTransfer.files; if (fs&&fs.length) handleFileList(Array.from(fs)); });
+{ let _pm=/[?&]mode=(volume|iso|mip)/.exec(location.search||''); if (_pm) setRenderMode(_pm[1]); }
+
+</script>
+</body>
+</html>
